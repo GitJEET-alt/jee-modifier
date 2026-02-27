@@ -9,46 +9,46 @@ import { Preview } from '@/components/Preview';
 import LoginScreen from '@/components/Login';
 
 export default function Home() {
-    const { data: session, status } = useSession();
+  const { data: session, status } = useSession();
 
-    const [jobs, setJobs] = useState<PaperJob[]>([]);
-    const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-    const [stageQ, setStageQ] = useState<File | null>(null);
-    const [stageS, setStageS] = useState<File | null>(null);
-    const [isQueueRunning, setIsQueueRunning] = useState(false);
+  const [jobs, setJobs] = useState<PaperJob[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [stageQ, setStageQ] = useState<File | null>(null);
+  const [stageS, setStageS] = useState<File | null>(null);
+  const [isQueueRunning, setIsQueueRunning] = useState(false);
 
-    // Still loading the session from NextAuth
-    if (status === 'loading') {
-        return (
-            <div className="flex items-center justify-center min-h-screen bg-slate-50">
-                <Loader2 className="w-8 h-8 animate-spin text-primary" />
-            </div>
-        );
+  // Still loading the session from NextAuth
+  if (status === 'loading') {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-slate-50">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  // If no valid session, show the Google Sign in button screen
+  if (!session) {
+    return <LoginScreen />;
+  }
+
+  // --- Main App Logic ---
+  const handleStageFileChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'q' | 's') => {
+    if (e.target.files && e.target.files[0]) {
+      if (type === 'q') setStageQ(e.target.files[0]);
+      else setStageS(e.target.files[0]);
     }
+  };
 
-    // If no valid session, show the Google Sign in button screen
-    if (!session) {
-        return <LoginScreen />;
-    }
+  const addJob = async () => {
+    if (!stageQ || !stageS) return;
 
-    // --- Main App Logic ---
-    const handleStageFileChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'q' | 's') => {
-        if (e.target.files && e.target.files[0]) {
-            if (type === 'q') setStageQ(e.target.files[0]);
-            else setStageS(e.target.files[0]);
-        }
-    };
+    // We do base64 conversion here so we don't pass raw Files into state that needs to go to API
+    const qBase64 = await fileToGenerativePart(stageQ);
+    const sBase64 = await fileToGenerativePart(stageS);
 
-    const addJob = async () => {
-        if (!stageQ || !stageS) return;
-
-        // We do base64 conversion here so we don't pass raw Files into state that needs to go to API
-        const qBase64 = await fileToGenerativePart(stageQ);
-        const sBase64 = await fileToGenerativePart(stageS);
-
-        const newJob: PaperJob = {
-            id: Date.now().toString() + Math.random().toString().slice(2),
-            name: \`\${stageQ.name.replace('.pdf', '')}\`,
+    const newJob: PaperJob = {
+      id: Date.now().toString() + Math.random().toString().slice(2),
+      name: `${stageQ.name.replace('.pdf', '')}`,
       qFile: stageQ,
       sFile: stageS,
       qFileBase64: qBase64,
@@ -79,7 +79,7 @@ export default function Home() {
   };
 
   const processSingleJob = async (job: PaperJob) => {
-    updateJob(job.id, { 
+    updateJob(job.id, {
       status: 'processing',
       progress: { ...job.progress, currentAction: 'Calling Secure API: Analyzing PDFs...' }
     });
@@ -95,12 +95,12 @@ export default function Home() {
           sPart: { inlineData: job.sFileBase64 }
         })
       });
-      
+
       const countData = await countRes.json();
       if (!countRes.ok) throw new Error(countData.error || 'Failed to detect questions from API');
-      
+
       const totalQ = countData.count;
-      
+
       if (!totalQ || totalQ === 0) {
         throw new Error("Could not detect any questions. Please ensure the PDF is clear.");
       }
@@ -108,7 +108,7 @@ export default function Home() {
       updateJob(job.id, {
         progress: {
           ...job.progress, totalQuestions: totalQ, processedCount: 0,
-          currentAction: \`Found \${totalQ} questions. Starting batch processing...\`
+          currentAction: `Found ${totalQ} questions. Starting batch processing...`
         }
       });
 
@@ -120,7 +120,7 @@ export default function Home() {
         updateJob(job.id, (j) => ({
           progress: {
             ...j.progress,
-            currentAction: \`Processing questions \${currentIdx} to \${Math.min(currentIdx + BATCH_SIZE - 1, totalQ)} via API...\`
+            currentAction: `Processing questions ${currentIdx} to ${Math.min(currentIdx + BATCH_SIZE - 1, totalQ)} via API...`
           }
         }));
 
@@ -140,7 +140,7 @@ export default function Home() {
         if (!batchRes.ok) throw new Error(batchData.error || 'Batch failed');
 
         const batchResults = batchData.results || [];
-        
+
         updateJob(job.id, (j) => ({
           questions: [...j.questions, ...batchResults],
           progress: {
@@ -148,7 +148,7 @@ export default function Home() {
             processedCount: Math.min(j.progress.processedCount + batchResults.length, totalQ)
           }
         }));
-        
+
         currentIdx += BATCH_SIZE;
         // Rate limit delay to prevent Vercel hobby limits
         await new Promise(r => setTimeout(r, 1000));
@@ -189,10 +189,10 @@ export default function Home() {
 
     if (type === 'questions') {
       const content = generateQuestionFileContent(job.questions);
-      downloadDocFile(\`\${job.name}_MODIFIED_QUESTIONS.doc\`, content);
+      downloadDocFile(`${job.name}_MODIFIED_QUESTIONS.doc`, content);
     } else {
       const content = generateSolutionFileContent(job.questions);
-      downloadDocFile(\`\${job.name}_MODIFIED_SOLUTIONS.doc\`, content);
+      downloadDocFile(`${job.name}_MODIFIED_SOLUTIONS.doc`, content);
     }
   };
 
@@ -209,7 +209,7 @@ export default function Home() {
             </h1>
             <p className="text-xs text-slate-500 mt-1">Next.js Secure Variant Generator</p>
           </div>
-          <button 
+          <button
             onClick={() => signOut()}
             className="text-xs text-slate-400 hover:text-slate-700 flex flex-col items-center gap-1 transition-colors"
             title="Sign out"
@@ -224,15 +224,15 @@ export default function Home() {
             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-2">
               <Plus className="w-4 h-4" /> Add Paper Pair
             </h2>
-            
+
             <div className="grid grid-cols-2 gap-2">
-              <div className={\`border border-dashed rounded p-2 text-center transition-colors \${stageQ ? 'bg-green-50 border-green-400' : 'bg-white border-slate-300 hover:border-primary'}\`}>
+              <div className={`border border-dashed rounded p-2 text-center transition-colors ${stageQ ? 'bg-green-50 border-green-400' : 'bg-white border-slate-300 hover:border-primary'}`}>
                 <input type="file" accept="application/pdf" onChange={(e) => handleStageFileChange(e, 'q')} className="hidden" id="stage-q" disabled={isQueueRunning} />
                 <label htmlFor="stage-q" className="cursor-pointer text-xs text-slate-600 block truncate">
                   {stageQ ? stageQ.name : "Question PDF"}
                 </label>
               </div>
-              <div className={\`border border-dashed rounded p-2 text-center transition-colors \${stageS ? 'bg-green-50 border-green-400' : 'bg-white border-slate-300 hover:border-primary'}\`}>
+              <div className={`border border-dashed rounded p-2 text-center transition-colors ${stageS ? 'bg-green-50 border-green-400' : 'bg-white border-slate-300 hover:border-primary'}`}>
                 <input type="file" accept="application/pdf" onChange={(e) => handleStageFileChange(e, 's')} className="hidden" id="stage-s" disabled={isQueueRunning} />
                 <label htmlFor="stage-s" className="cursor-pointer text-xs text-slate-600 block truncate">
                   {stageS ? stageS.name : "Solution PDF"}
@@ -240,7 +240,7 @@ export default function Home() {
               </div>
             </div>
 
-            <button 
+            <button
               onClick={addJob}
               disabled={!stageQ || !stageS || isQueueRunning}
               className="w-full bg-slate-800 hover:bg-slate-700 disabled:bg-slate-300 text-white py-2 rounded text-xs font-bold flex items-center justify-center gap-2"
@@ -253,7 +253,7 @@ export default function Home() {
             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-2 px-1">
               <Layers className="w-4 h-4" /> Queue ({jobs.length})
             </h2>
-            
+
             {jobs.length === 0 ? (
               <div className="text-center py-8 text-slate-400 text-sm italic">
                 No papers added yet.
@@ -261,13 +261,13 @@ export default function Home() {
             ) : (
               <div className="space-y-3">
                 {jobs.map(job => (
-                  <div 
-                    key={job.id} 
+                  <div
+                    key={job.id}
                     onClick={() => setSelectedJobId(job.id)}
-                    className={\`relative p-3 rounded-lg border cursor-pointer transition-all \${selectedJobId === job.id ? 'border-primary bg-blue-50 ring-1 ring-primary' : 'border-slate-200 bg-white hover:border-blue-300'}\`}
+                    className={`relative p-3 rounded-lg border cursor-pointer transition-all ${selectedJobId === job.id ? 'border-primary bg-blue-50 ring-1 ring-primary' : 'border-slate-200 bg-white hover:border-blue-300'}`}
                   >
                     {!isQueueRunning && (
-                      <button 
+                      <button
                         onClick={(e) => removeJob(job.id, e)}
                         className="absolute top-2 right-2 text-slate-300 hover:text-red-500 transition-colors"
                       >
@@ -285,9 +285,9 @@ export default function Home() {
 
                     {(job.status === 'processing' || (job.status === 'completed' && job.progress.totalQuestions > 0)) && (
                       <div className="w-full bg-slate-200 rounded-full h-1.5 mb-2 overflow-hidden">
-                        <div 
-                          className={\`h-full transition-all duration-500 \${job.status === 'completed' ? 'bg-green-500' : 'bg-primary'}\`}
-                          style={{ width: \`\${(job.progress.processedCount / (job.progress.totalQuestions || 1)) * 100}%\` }}
+                        <div
+                          className={`h-full transition-all duration-500 ${job.status === 'completed' ? 'bg-green-500' : 'bg-primary'}`}
+                          style={{ width: `${(job.progress.processedCount / (job.progress.totalQuestions || 1)) * 100}%` }}
                         />
                       </div>
                     )}
@@ -297,20 +297,20 @@ export default function Home() {
                     </div>
 
                     {job.status === 'completed' && (
-                       <div className="flex gap-2 mt-3 pt-2 border-t border-slate-100">
-                         <button 
-                           onClick={(e) => { e.stopPropagation(); handleDownload(job.id, 'questions'); }}
-                           className="flex-1 py-1 text-[10px] font-bold bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded flex items-center justify-center gap-1"
-                         >
-                           <FileText className="w-3 h-3" /> Q
-                         </button>
-                         <button 
-                           onClick={(e) => { e.stopPropagation(); handleDownload(job.id, 'solutions'); }}
-                           className="flex-1 py-1 text-[10px] font-bold bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded flex items-center justify-center gap-1"
-                         >
-                           <FileText className="w-3 h-3" /> Sol
-                         </button>
-                       </div>
+                      <div className="flex gap-2 mt-3 pt-2 border-t border-slate-100">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDownload(job.id, 'questions'); }}
+                          className="flex-1 py-1 text-[10px] font-bold bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded flex items-center justify-center gap-1"
+                        >
+                          <FileText className="w-3 h-3" /> Q
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDownload(job.id, 'solutions'); }}
+                          className="flex-1 py-1 text-[10px] font-bold bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded flex items-center justify-center gap-1"
+                        >
+                          <FileText className="w-3 h-3" /> Sol
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}
@@ -320,7 +320,7 @@ export default function Home() {
         </div>
 
         <div className="p-4 border-t border-slate-100 bg-slate-50">
-          <button 
+          <button
             onClick={startQueue}
             disabled={isQueueRunning || pendingCount === 0}
             className="w-full bg-primary hover:bg-blue-600 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3 rounded-lg font-bold shadow-md transition-all flex items-center justify-center gap-2"
@@ -332,50 +332,49 @@ export default function Home() {
             )}
           </button>
         </div>
-      </div>
+      </div >
 
       <div className="flex-1 h-full overflow-hidden flex flex-col">
         <header className="h-16 bg-white border-b border-slate-200 flex items-center px-8 justify-between">
           <h2 className="font-semibold text-slate-700 flex items-center gap-2">
             {selectedJob ? (
-               <>
-                 <FileText className="w-4 h-4 text-slate-400" />
-                 {selectedJob.name}
-                 <span className={\`text-xs px-2 py-0.5 rounded-full \${
-                   selectedJob.status === 'completed' ? 'bg-green-100 text-green-700' :
-                   selectedJob.status === 'processing' ? 'bg-blue-100 text-blue-700' :
-                   selectedJob.status === 'error' ? 'bg-red-100 text-red-700' :
-                   'bg-slate-100 text-slate-600'
-                 }\`}>
-                   {selectedJob.status}
-                 </span>
-               </>
+              <>
+                <FileText className="w-4 h-4 text-slate-400" />
+                {selectedJob.name}
+                <span className={`text-xs px-2 py-0.5 rounded-full ${selectedJob.status === 'completed' ? 'bg-green-100 text-green-700' :
+                  selectedJob.status === 'processing' ? 'bg-blue-100 text-blue-700' :
+                    selectedJob.status === 'error' ? 'bg-red-100 text-red-700' :
+                      'bg-slate-100 text-slate-600'
+                  }`}>
+                  {selectedJob.status}
+                </span>
+              </>
             ) : "Preview Area"}
           </h2>
           <div className="text-xs flex items-center gap-4">
-             <span className="text-slate-500 font-medium">{session?.user?.email}</span>
+            <span className="text-slate-500 font-medium">{session?.user?.email}</span>
           </div>
         </header>
 
         <main className="flex-1 overflow-y-auto p-8 bg-slate-50 relative">
           {selectedJob ? (
-            <Preview 
-              questions={selectedJob.questions} 
+            <Preview
+              questions={selectedJob.questions}
               emptyMessage={
-                selectedJob.status === 'pending' ? <><Clock className="w-8 h-8 mb-2 opacity-50"/> <p>Waiting in queue...</p></> :
-                selectedJob.status === 'processing' ? <><Loader2 className="w-8 h-8 mb-2 animate-spin text-primary"/> <p>Executing secure API calls...</p></> :
-                selectedJob.status === 'error' ? <><AlertCircle className="w-8 h-8 mb-2 text-red-500"/> <p className="text-red-500">Processing failed.</p></> : 
-                undefined
+                selectedJob.status === 'pending' ? <><Clock className="w-8 h-8 mb-2 opacity-50" /> <p>Waiting in queue...</p></> :
+                  selectedJob.status === 'processing' ? <><Loader2 className="w-8 h-8 mb-2 animate-spin text-primary" /> <p>Executing secure API calls...</p></> :
+                    selectedJob.status === 'error' ? <><AlertCircle className="w-8 h-8 mb-2 text-red-500" /> <p className="text-red-500">Processing failed.</p></> :
+                      undefined
               }
             />
           ) : (
-             <div className="flex flex-col items-center justify-center h-full text-slate-400">
-               <Layers className="w-12 h-12 mb-4 opacity-20" />
-               <p>Select a paper from the queue to view details.</p>
-             </div>
+            <div className="flex flex-col items-center justify-center h-full text-slate-400">
+              <Layers className="w-12 h-12 mb-4 opacity-20" />
+              <p>Select a paper from the queue to view details.</p>
+            </div>
           )}
         </main>
       </div>
-    </div>
+    </div >
   );
 }

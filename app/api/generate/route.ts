@@ -101,60 +101,60 @@ export async function POST(req: Request) {
 
     // Determine the Vertex AI URL provided by the user
     // The user's specific URL from the curl command:
-    const VERTEX_URL = \`https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent?key=\${apiKey}\`;
+    const VERTEX_URL = `https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
 
     const body = await req.json();
     const { action, qPart, sPart, startIndex, batchSize } = body;
 
     // Helper function to build the payload for the direct REST call to Vertex AI
     const makeVertexCall = async (promptText: string) => {
-        const payload = {
-          systemInstruction: {
-             parts: [{ text: SYSTEM_INSTRUCTION }]
-          },
-          contents: [
-            {
-               role: "user",
-               parts: [
-                 {
-                   inlineData: {
-                     data: qPart.inlineData.data,
-                     mimeType: qPart.inlineData.mimeType
-                   }
-                 },
-                 {
-                   inlineData: {
-                     data: sPart.inlineData.data,
-                     mimeType: sPart.inlineData.mimeType
-                   }
-                 },
-                 { text: promptText }
-               ]
-            }
-          ],
-          generationConfig: action === 'batch' ? {
-              responseMimeType: "application/json",
-              responseSchema: RESPONSE_SCHEMA
-          } : undefined
-        };
+      const payload = {
+        systemInstruction: {
+          parts: [{ text: SYSTEM_INSTRUCTION }]
+        },
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  data: qPart.inlineData.data,
+                  mimeType: qPart.inlineData.mimeType
+                }
+              },
+              {
+                inlineData: {
+                  data: sPart.inlineData.data,
+                  mimeType: sPart.inlineData.mimeType
+                }
+              },
+              { text: promptText }
+            ]
+          }
+        ],
+        generationConfig: action === 'batch' ? {
+          responseMimeType: "application/json",
+          responseSchema: RESPONSE_SCHEMA
+        } : undefined
+      };
 
-        const res = await fetch(VERTEX_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
+      const res = await fetch(VERTEX_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
 
-        if (!res.ok) {
-            const errorText = await res.text();
-            throw new Error(\`Vertex AI Error: \${res.status} \${res.statusText} - \${errorText}\`);
-        }
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`Vertex AI Error: ${res.status} ${res.statusText} - ${errorText}`);
+      }
 
-        const data = await res.json();
-        // Extract the text response from the Vertex API format
-        if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
-           return data.candidates[0].content.parts[0].text;
-        }
-        return "0";
+      const data = await res.json();
+      // Extract the text response from the Vertex API format
+      if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
+        return data.candidates[0].content.parts[0].text;
+      }
+      return "0";
     };
 
     // Action 1: Count questions
@@ -166,8 +166,8 @@ export async function POST(req: Request) {
 
     // Action 2: Process a batch
     if (action === 'batch') {
-      const prompt = \`
-        Generate variants for questions \${startIndex} to \${startIndex + batchSize - 1}.
+      const prompt = `
+        Generate variants for questions ${startIndex} to ${startIndex + batchSize - 1}.
         
         REMINDERS:
         - STRICTLY REFRAME the language and context. Do NOT copy original text.
@@ -182,20 +182,20 @@ export async function POST(req: Request) {
         - **Solutions**: STRICTLY LIMIT solution to 4-5 sentences max. Be concise.
         
         Return valid JSON.
-      \`;
+      `;
 
       const jsonText = await makeVertexCall(prompt);
-      
+
       let cleanJson = jsonText;
       const firstBracket = jsonText.indexOf('[');
       const lastBracket = jsonText.lastIndexOf(']');
-      
+
       if (firstBracket !== -1 && lastBracket !== -1) {
         cleanJson = jsonText.substring(firstBracket, lastBracket + 1);
       }
 
       const rawData = JSON.parse(cleanJson);
-      
+
       // Map optionsList back to options mapping expected by the frontend
       const processed = rawData.map((q: any) => {
         const optionsMap: Record<string, string> = {};
@@ -204,9 +204,9 @@ export async function POST(req: Request) {
             if (opt.key && opt.value) optionsMap[opt.key] = opt.value;
           });
         } else if (q.options && typeof q.options === 'object') {
-           Object.entries(q.options).forEach(([k, v]) => {
-             optionsMap[k] = v as string;
-           });
+          Object.entries(q.options).forEach(([k, v]) => {
+            optionsMap[k] = v as string;
+          });
         }
 
         return {
