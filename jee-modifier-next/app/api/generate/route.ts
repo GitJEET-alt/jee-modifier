@@ -101,7 +101,11 @@ export async function POST(req: Request) {
 
     // Determine the Vertex AI URL provided by the user
     // The user's specific URL from the curl command:
+<<<<<<< HEAD:app/api/generate/route.ts
     const VERTEX_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+=======
+    const VERTEX_URL = `https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+>>>>>>> 78daad3b5c1f72d1b24e469c8e2770f17a72b172:jee-modifier-next/app/api/generate/route.ts
 
     const body = await req.json();
     const { action, qPart, sPart, startIndex, batchSize } = body;
@@ -112,12 +116,15 @@ export async function POST(req: Request) {
         systemInstruction: {
           parts: [{ text: SYSTEM_INSTRUCTION }]
         },
+<<<<<<< HEAD:app/api/generate/route.ts
         safetySettings: [
           { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
           { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
           { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
           { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
         ],
+=======
+>>>>>>> 78daad3b5c1f72d1b24e469c8e2770f17a72b172:jee-modifier-next/app/api/generate/route.ts
         contents: [
           {
             role: "user",
