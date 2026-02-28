@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
-import { authOptions } from '../auth/[...nextauth]/route';
+import { authOptions } from '@/lib/auth';
 
 const SYSTEM_INSTRUCTION = `
 You are an expert JEE-level question-writer. Your task is to generate FRESH VARIANTS of uploaded questions.
@@ -101,7 +101,7 @@ export async function POST(req: Request) {
 
     // Determine the Vertex AI URL provided by the user
     // The user's specific URL from the curl command:
-    const VERTEX_URL = `https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+    const VERTEX_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
 
     const body = await req.json();
     const { action, qPart, sPart, startIndex, batchSize } = body;
@@ -112,6 +112,12 @@ export async function POST(req: Request) {
         systemInstruction: {
           parts: [{ text: SYSTEM_INSTRUCTION }]
         },
+        safetySettings: [
+          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+        ],
         contents: [
           {
             role: "user",
