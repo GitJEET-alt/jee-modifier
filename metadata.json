@@ -1,0 +1,5 @@
+{
+  "name": "JEE Paper Modifier - Muskan 04",
+  "description": "An AI-powered tool that regenerates fresh variants of JEE questions from uploaded PDF papers and solutions, exporting to formatted text files.",
+  "requestFramePermissions": []
+}
