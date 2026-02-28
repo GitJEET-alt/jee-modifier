@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
-import { authOptions } from '../auth/[...nextauth]/route';
+import { authOptions } from '@/lib/auth';
 
 const SYSTEM_INSTRUCTION = `
 You are an expert JEE-level question-writer. Your task is to generate FRESH VARIANTS of uploaded questions.
