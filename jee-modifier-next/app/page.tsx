@@ -115,6 +115,41 @@ export default function Home() {
     }));
   };
 
+  // Helper: safely call the API and parse the JSON response.
+  // Vercel Hobby plan returns plain-text errors (e.g. "Request Entity Too Large") when
+  // the body exceeds 4.5 MB. This helper converts those into readable errors.
+  const safeApiFetch = async (payload: object): Promise<any> => {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    // Try to read as text first so we never lose the body
+    const text = await res.text();
+
+    if (!res.ok) {
+      // Detect Vercel body-size limit
+      if (res.status === 413 || text.toLowerCase().includes('request entity too large') || text.toLowerCase().includes('payload too large')) {
+        throw new Error('PDFs are too large for the server (4.5 MB limit). Please use smaller / compressed PDFs.');
+      }
+      // Try to extract a JSON error message
+      try {
+        const json = JSON.parse(text);
+        throw new Error(json.error || `API Error ${res.status}`);
+      } catch (parseErr: any) {
+        if (parseErr.message.startsWith('PDFs are too large') || parseErr.message.startsWith('API Error')) throw parseErr;
+        throw new Error(`Server Error ${res.status}: ${text.substring(0, 200)}`);
+      }
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`Invalid response from server: ${text.substring(0, 200)}`);
+    }
+  };
+
   const processSingleJob = async (job: PaperJob) => {
     updateJob(job.id, {
       status: 'processing',
@@ -123,19 +158,12 @@ export default function Home() {
 
     try {
       // 1. Get Count via Next.js Backend API
-      const countRes = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'count',
-          subject: job.subject,
-          qPart: { inlineData: job.qFileBase64 },
-          sPart: { inlineData: job.sFileBase64 }
-        })
+      const countData = await safeApiFetch({
+        action: 'count',
+        subject: job.subject,
+        qPart: { inlineData: job.qFileBase64 },
+        sPart: { inlineData: job.sFileBase64 }
       });
-
-      const countData = await countRes.json();
-      if (!countRes.ok) throw new Error(countData.error || 'Failed to detect questions from API');
 
       const totalQ = countData.count;
 
@@ -162,21 +190,16 @@ export default function Home() {
           }
         }));
 
-        const batchRes = await fetch('/api/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'batch',
-            subject: job.subject,
-            startIndex: currentIdx,
-            batchSize: BATCH_SIZE,
-            qPart: { inlineData: job.qFileBase64 },
-            sPart: { inlineData: job.sFileBase64 }
-          })
+        const batchData = await safeApiFetch({
+          action: 'batch',
+          subject: job.subject,
+          startIndex: currentIdx,
+          batchSize: BATCH_SIZE,
+          qPart: { inlineData: job.qFileBase64 },
+          sPart: { inlineData: job.sFileBase64 }
         });
 
-        const batchData = await batchRes.json();
-        if (!batchRes.ok) throw new Error(batchData.error || 'Batch failed');
+        if (!batchData.results) throw new Error('Batch failed: no results returned');
 
         const batchResults = batchData.results || [];
 
@@ -276,8 +299,8 @@ export default function Home() {
                   <label
                     key={exam}
                     className={`flex items-center gap-2 cursor-pointer px-3 py-2 rounded-lg border text-xs font-semibold transition-all select-none ${selectedExam === exam
-                        ? 'border-primary bg-blue-50 text-primary'
-                        : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300'
+                      ? 'border-primary bg-blue-50 text-primary'
+                      : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300'
                       }`}
                   >
                     <input
@@ -304,8 +327,8 @@ export default function Home() {
                     <label
                       key={s.label}
                       className={`flex items-center gap-2 cursor-pointer px-3 py-2 rounded-lg border text-xs font-semibold transition-all select-none ${selectedSubjectLabel === s.label
-                          ? 'border-primary bg-blue-50 text-primary'
-                          : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300'
+                        ? 'border-primary bg-blue-50 text-primary'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300'
                         }`}
                     >
                       <input
