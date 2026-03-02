@@ -1,11 +1,3 @@
-<<<<<<< HEAD:app/api/auth/[...nextauth]/route.ts
-import NextAuth from "next-auth";
-import { authOptions } from "@/lib/auth";
-
-const handler = NextAuth(authOptions);
-
-export { handler as GET, handler as POST };
-=======
 import { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 
@@ -51,4 +43,3 @@ export const authOptions: NextAuthOptions = {
         // signIn: '/auth/signin', 
     }
 };
->>>>>>> 78daad3b5c1f72d1b24e469c8e2770f17a72b172:jee-modifier-next/lib/auth.ts
