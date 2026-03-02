@@ -8,6 +8,27 @@ import { fileToGenerativePart, generateQuestionFileContent, generateSolutionFile
 import { Preview } from '@/components/Preview';
 import LoginScreen from '@/components/Login';
 
+// ─── Exam / Subject config ────────────────────────────────────────────────────
+const EXAM_SUBJECTS: Record<string, { label: string; value: string }[]> = {
+  jee: [
+    { label: 'Physics', value: 'jee' },
+    { label: 'Chemistry', value: 'jee' },
+    { label: 'Maths', value: 'jee' },
+  ],
+  neet: [
+    { label: 'Physics', value: 'neet-phychem' },
+    { label: 'Chemistry', value: 'neet-phychem' },
+    { label: 'Biology', value: 'neet-bio' },
+  ],
+};
+
+// Human-readable badge labels for each subject value
+const SUBJECT_BADGE: Record<string, string> = {
+  jee: 'JEE',
+  'neet-phychem': 'NEET · Phy/Chem',
+  'neet-bio': 'NEET · Biology',
+};
+
 export default function Home() {
   const { data: session, status } = useSession();
 
@@ -16,6 +37,12 @@ export default function Home() {
   const [stageQ, setStageQ] = useState<File | null>(null);
   const [stageS, setStageS] = useState<File | null>(null);
   const [isQueueRunning, setIsQueueRunning] = useState(false);
+
+  // Exam + Subject selection state
+  const [selectedExam, setSelectedExam] = useState<'jee' | 'neet' | null>(null);
+  // Track which subject label is selected (unique per exam row, e.g. "Physics", "Chemistry", "Biology")
+  // We derive the API subject value from the label at job-creation time.
+  const [selectedSubjectLabel, setSelectedSubjectLabel] = useState<string | null>(null);
 
   // Still loading the session from NextAuth
   if (status === 'loading') {
@@ -39,8 +66,17 @@ export default function Home() {
     }
   };
 
+  const handleExamChange = (exam: 'jee' | 'neet') => {
+    setSelectedExam(exam);
+    setSelectedSubjectLabel(null); // reset subject when exam changes
+  };
+
   const addJob = async () => {
-    if (!stageQ || !stageS) return;
+    if (!stageQ || !stageS || !selectedSubjectLabel || !selectedExam) return;
+    // Derive the backend subject value from the selected label
+    const subjectEntry = EXAM_SUBJECTS[selectedExam].find(s => s.label === selectedSubjectLabel);
+    if (!subjectEntry) return;
+    const selectedSubjectValue = subjectEntry.value;
 
     // We do base64 conversion here so we don't pass raw Files into state that needs to go to API
     const qBase64 = await fileToGenerativePart(stageQ);
@@ -49,6 +85,7 @@ export default function Home() {
     const newJob: PaperJob = {
       id: Date.now().toString() + Math.random().toString().slice(2),
       name: `${stageQ.name.replace('.pdf', '')}`,
+      subject: selectedSubjectValue,
       qFile: stageQ,
       sFile: stageS,
       qFileBase64: qBase64,
@@ -91,6 +128,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'count',
+          subject: job.subject,
           qPart: { inlineData: job.qFileBase64 },
           sPart: { inlineData: job.sFileBase64 }
         })
@@ -129,6 +167,7 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'batch',
+            subject: job.subject,
             startIndex: currentIdx,
             batchSize: BATCH_SIZE,
             qPart: { inlineData: job.qFileBase64 },
@@ -199,13 +238,17 @@ export default function Home() {
   const selectedJob = jobs.find(j => j.id === selectedJobId);
   const pendingCount = jobs.filter(j => j.status === 'pending').length;
 
+  // Subjects for the currently selected exam
+  const currentSubjects = selectedExam ? EXAM_SUBJECTS[selectedExam] : [];
+  const canAddJob = !!stageQ && !!stageS && !!selectedSubjectLabel && !isQueueRunning;
+
   return (
     <div className="flex h-screen bg-slate-50">
       <div className="w-96 bg-white border-r border-slate-200 flex flex-col shadow-lg z-10">
         <div className="p-6 border-b border-slate-100 flex justify-between items-start">
           <div>
             <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-              <span className="text-primary text-3xl">∑</span> JEE Modifier
+              <span className="text-primary text-3xl">∑</span> Exam Modifier
             </h1>
             <p className="text-xs text-slate-500 mt-1">Next.js Secure Variant Generator</p>
           </div>
@@ -220,11 +263,68 @@ export default function Home() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
-          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
-            <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-4">
+            <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
               <Plus className="w-4 h-4" /> Add Paper Pair
             </h2>
 
+            {/* ── Exam selection ── */}
+            <div>
+              <p className="text-xs font-semibold text-slate-600 mb-2">Exam</p>
+              <div className="flex gap-3">
+                {(['jee', 'neet'] as const).map((exam) => (
+                  <label
+                    key={exam}
+                    className={`flex items-center gap-2 cursor-pointer px-3 py-2 rounded-lg border text-xs font-semibold transition-all select-none ${selectedExam === exam
+                        ? 'border-primary bg-blue-50 text-primary'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300'
+                      }`}
+                  >
+                    <input
+                      type="radio"
+                      name="exam"
+                      value={exam}
+                      checked={selectedExam === exam}
+                      onChange={() => handleExamChange(exam)}
+                      disabled={isQueueRunning}
+                      className="accent-blue-600"
+                    />
+                    {exam.toUpperCase()}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Subject selection (shown only after exam is picked) ── */}
+            {selectedExam && (
+              <div>
+                <p className="text-xs font-semibold text-slate-600 mb-2">Subject</p>
+                <div className="flex flex-col gap-2">
+                  {currentSubjects.map((s) => (
+                    <label
+                      key={s.label}
+                      className={`flex items-center gap-2 cursor-pointer px-3 py-2 rounded-lg border text-xs font-semibold transition-all select-none ${selectedSubjectLabel === s.label
+                          ? 'border-primary bg-blue-50 text-primary'
+                          : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300'
+                        }`}
+                    >
+                      <input
+                        type="radio"
+                        name="subject"
+                        value={s.label}
+                        checked={selectedSubjectLabel === s.label}
+                        onChange={() => setSelectedSubjectLabel(s.label)}
+                        disabled={isQueueRunning}
+                        className="accent-blue-600"
+                      />
+                      {s.label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── File uploads ── */}
             <div className="grid grid-cols-2 gap-2">
               <div className={`border border-dashed rounded p-2 text-center transition-colors ${stageQ ? 'bg-green-50 border-green-400' : 'bg-white border-slate-300 hover:border-primary'}`}>
                 <input type="file" accept="application/pdf" onChange={(e) => handleStageFileChange(e, 'q')} className="hidden" id="stage-q" disabled={isQueueRunning} />
@@ -242,7 +342,7 @@ export default function Home() {
 
             <button
               onClick={addJob}
-              disabled={!stageQ || !stageS || isQueueRunning}
+              disabled={!canAddJob}
               className="w-full bg-slate-800 hover:bg-slate-700 disabled:bg-slate-300 text-white py-2 rounded text-xs font-bold flex items-center justify-center gap-2"
             >
               Add to Queue
@@ -275,12 +375,19 @@ export default function Home() {
                       </button>
                     )}
 
-                    <div className="flex items-center gap-2 mb-2 pr-4">
+                    <div className="flex items-center gap-2 mb-1 pr-4">
                       {job.status === 'pending' && <Clock className="w-4 h-4 text-slate-400" />}
                       {job.status === 'processing' && <Loader2 className="w-4 h-4 text-primary animate-spin" />}
                       {job.status === 'completed' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
                       {job.status === 'error' && <AlertCircle className="w-4 h-4 text-red-500" />}
                       <span className="font-semibold text-sm text-slate-700 truncate block w-full">{job.name}</span>
+                    </div>
+
+                    {/* Subject badge */}
+                    <div className="mb-2">
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
+                        {SUBJECT_BADGE[job.subject] ?? job.subject}
+                      </span>
                     </div>
 
                     {(job.status === 'processing' || (job.status === 'completed' && job.progress.totalQuestions > 0)) && (
@@ -292,7 +399,7 @@ export default function Home() {
                       </div>
                     )}
 
-                    <div className="text-xs text-slate-500 truncate">
+                    <div className="text-xs text-slate-500 whitespace-pre-wrap">
                       {job.progress.error ? <span className="text-red-500">{job.progress.error}</span> : job.progress.currentAction}
                     </div>
 

@@ -19,6 +19,7 @@ export interface ProcessingStatus {
 export interface PaperJob {
     id: string;
     name: string;
+    subject: string; // 'jee' | 'neet-phychem' | 'neet-bio'
     qFile: File;
     sFile: File;
     // We store base64 string for the backend fetch calls instead of passing raw File objects around
