@@ -376,6 +376,23 @@ export async function POST(req: Request) {
         throw new Error(`Failed to parse an integer from Vertex AI response. Raw Response String was: "${text}"`);
       }
 
+      const scriptUrl = process.env.SHEETS_WEBAPP_URL;
+      if (scriptUrl) {
+        try {
+          await fetch(scriptUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: session.user?.email,
+              subject,
+              totalQuestions: count,
+            }),
+          });
+        } catch (err) {
+          console.error("Usage log failed:", err);
+        }
+      }
+
       return NextResponse.json({ count });
     }
 

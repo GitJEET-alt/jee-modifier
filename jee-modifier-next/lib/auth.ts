@@ -1,9 +1,12 @@
 import { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 
-// Ensure required environment variables are present (fail fast in production)
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
     console.warn("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables.");
+}
+
+if (!process.env.SHEETS_WEBAPP_URL) {
+    console.warn("Missing SHEETS_WEBAPP_URL — sign-in will reject every user until this is set.");
 }
 
 export const authOptions: NextAuthOptions = {
@@ -15,21 +18,31 @@ export const authOptions: NextAuthOptions = {
     ],
     callbacks: {
         async signIn({ user }) {
-            // 1. Check if the user has an email
             if (!user.email) return false;
 
-            // 2. Load the allowlist from environment variables
-            const allowedEmailsRaw = process.env.ALLOWED_EMAILS || "";
-            const allowedEmails = allowedEmailsRaw.split(",").map(e => e.trim().toLowerCase());
-
-            // 3. Grant access ONLY if their email is in the allowlist
-            if (allowedEmails.includes(user.email.toLowerCase())) {
-                return true;
+            const scriptUrl = process.env.SHEETS_WEBAPP_URL;
+            if (!scriptUrl) {
+                console.error("SHEETS_WEBAPP_URL not configured — denying access");
+                return false;
             }
 
-            // Reject login
-            console.log(`Rejected login attempt from unauthorized email: ${user.email}`);
-            return false;
+            try {
+                const res = await fetch(
+                    `${scriptUrl}?email=${encodeURIComponent(user.email)}`,
+                    { cache: "no-store" }
+                );
+                if (!res.ok) {
+                    console.error(`Whitelist check failed for ${user.email}: HTTP ${res.status}`);
+                    return false;
+                }
+                const data = await res.json();
+                if (data.allowed === true) return true;
+                console.log(`Rejected login from unauthorized email: ${user.email}`);
+                return false;
+            } catch (err) {
+                console.error(`Whitelist check error for ${user.email}:`, err);
+                return false;
+            }
         },
         async session({ session, token }) {
             return session;
@@ -38,8 +51,5 @@ export const authOptions: NextAuthOptions = {
     session: {
         strategy: "jwt",
     },
-    pages: {
-        // You can customize the sign in page route here if wanted
-        // signIn: '/auth/signin', 
-    }
+    pages: {}
 };
