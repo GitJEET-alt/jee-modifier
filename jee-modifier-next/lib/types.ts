@@ -22,9 +22,8 @@ export interface PaperJob {
     subject: string; // 'jee' | 'neet-phychem' | 'neet-bio'
     qFile: File;
     sFile: File;
-    // We store base64 string for the backend fetch calls instead of passing raw File objects around
-    qFileBase64?: { data: string; mimeType: string };
-    sFileBase64?: { data: string; mimeType: string };
+    qFileBase64: { data: string; mimeType: string };
+    sFileBase64: { data: string; mimeType: string };
     status: 'pending' | 'processing' | 'completed' | 'error';
     questions: ProcessedQuestion[];
     progress: ProcessingStatus;
