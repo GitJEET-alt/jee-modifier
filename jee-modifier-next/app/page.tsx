@@ -153,19 +153,22 @@ export default function Home() {
   const processSingleJob = async (job: PaperJob) => {
     updateJob(job.id, {
       status: 'processing',
-      progress: { ...job.progress, currentAction: 'Calling Secure API: Analyzing PDFs...' }
+      progress: { ...job.progress, currentAction: 'Uploading PDFs to Gemini and counting questions...' }
     });
 
     try {
-      // 1. Get Count via Next.js Backend API
-      const countData = await safeApiFetch({
-        action: 'count',
+      // 1. Init: upload PDFs once to Gemini File API, get count + chat history seed
+      const initData = await safeApiFetch({
+        action: 'init',
         subject: job.subject,
-        qPart: { inlineData: job.qFileBase64 },
-        sPart: { inlineData: job.sFileBase64 }
+        qPdfBase64: job.qFileBase64.data,
+        qMime: job.qFileBase64.mimeType,
+        sPdfBase64: job.sFileBase64.data,
+        sMime: job.sFileBase64.mimeType,
       });
 
-      const totalQ = countData.count;
+      const totalQ = initData.count;
+      let history = initData.history;
 
       if (!totalQ || totalQ === 0) {
         throw new Error("Could not detect any questions. Please ensure the PDF is clear.");
@@ -178,7 +181,7 @@ export default function Home() {
         }
       });
 
-      // 2. Process Batches via Next.js Backend API
+      // 2. Batch loop — thread chat history through each call so the model remembers prior batches
       const BATCH_SIZE = 5;
       let currentIdx = 1;
 
@@ -195,12 +198,12 @@ export default function Home() {
           subject: job.subject,
           startIndex: currentIdx,
           batchSize: BATCH_SIZE,
-          qPart: { inlineData: job.qFileBase64 },
-          sPart: { inlineData: job.sFileBase64 }
+          history,
         });
 
         if (!batchData.results) throw new Error('Batch failed: no results returned');
 
+        history = batchData.history;
         const batchResults = batchData.results || [];
 
         updateJob(job.id, (j) => ({
@@ -212,7 +215,6 @@ export default function Home() {
         }));
 
         currentIdx += BATCH_SIZE;
-        // Rate limit delay to prevent Vercel hobby limits
         await new Promise(r => setTimeout(r, 1000));
       }
 

@@ -17,7 +17,8 @@
     "react-markdown": "^9.0.1",
     "remark-math": "^6.0.0",
     "rehype-katex": "^7.0.0",
-    "katex": "^0.16.10"
+    "katex": "^0.16.10",
+    "@google/genai": "^1.31.0"
   },
   "devDependencies": {
     "typescript": "^5",

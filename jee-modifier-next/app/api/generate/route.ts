@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
 import { authOptions } from '@/lib/auth';
+import { GoogleGenAI } from '@google/genai';
+
+export const maxDuration = 60;
 
 // ─── JEE System Instruction ──────────────────────────────────────────────────
 const SYSTEM_INSTRUCTION_JEE = `
@@ -274,9 +277,67 @@ const RESPONSE_SCHEMA = {
   }
 };
 
+const MODEL = 'gemini-2.5-pro';
+
+const SAFETY_SETTINGS = [
+  { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+  { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+  { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+  { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+];
+
+const COUNT_PROMPT = "Analyze the uploaded Question Paper and Solution Paper. How many distinct questions are there? Return ONLY the integer number.";
+
+async function waitForActive(ai: GoogleGenAI, fileName: string, maxWaitMs = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const file = await ai.files.get({ name: fileName });
+    if (file.state === 'ACTIVE') return file;
+    if (file.state === 'FAILED') {
+      throw new Error(`Gemini rejected uploaded file ${fileName}`);
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(`Gemini file ${fileName} did not become ACTIVE within ${maxWaitMs}ms`);
+}
+
+async function uploadPdf(ai: GoogleGenAI, base64: string, mimeType: string, displayName: string) {
+  const buffer = Buffer.from(base64, 'base64');
+  const blob = new Blob([buffer], { type: mimeType });
+  const uploaded = await ai.files.upload({
+    file: blob,
+    config: { mimeType, displayName }
+  });
+  if (!uploaded.name) throw new Error(`Upload of ${displayName} returned no file name`);
+  return waitForActive(ai, uploaded.name);
+}
+
+function processBatchResults(rawData: any[]) {
+  return rawData.map((q: any) => {
+    const optionsMap: Record<string, string> = {};
+    if (q.optionsList && Array.isArray(q.optionsList)) {
+      q.optionsList.forEach((opt: any) => {
+        if (opt.key && opt.value) optionsMap[opt.key] = opt.value;
+      });
+    } else if (q.options && typeof q.options === 'object') {
+      Object.entries(q.options).forEach(([k, v]) => {
+        optionsMap[k] = v as string;
+      });
+    }
+    return {
+      originalIndex: q.originalIndex,
+      questionText: q.questionText,
+      type: q.type,
+      options: Object.keys(optionsMap).length > 0 ? optionsMap : undefined,
+      answer: q.answer,
+      solution: q.solution,
+      diagramNote: q.diagramNote
+    };
+  });
+}
+
 export async function POST(req: Request) {
   try {
-    // 1. Check for valid user session (Protect the API Key)
     const session = await getServerSession(authOptions);
     if (!session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -287,94 +348,54 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing API Key in Environment Variables' }, { status: 500 });
     }
 
-    // Determine the Vertex AI URL provided by the user
-    const VERTEX_URL = `https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
-
+    const ai = new GoogleGenAI({ apiKey });
     const body = await req.json();
-    const { action, qPart, sPart, startIndex, batchSize, subject = 'jee' } = body;
-
+    const { action, subject = 'jee' } = body;
     const systemInstruction = getSystemInstruction(subject);
 
-    // Helper function to build the payload for the direct REST call to Vertex AI
-    const makeVertexCall = async (promptText: string, includeSchema = false) => {
-      const payload = {
-        systemInstruction: {
-          parts: [{ text: systemInstruction }]
-        },
-        safetySettings: [
-          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-        ],
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                inlineData: {
-                  data: qPart.inlineData.data,
-                  mimeType: qPart.inlineData.mimeType
-                }
-              },
-              {
-                inlineData: {
-                  data: sPart.inlineData.data,
-                  mimeType: sPart.inlineData.mimeType
-                }
-              },
-              { text: promptText }
-            ]
-          }
-        ],
-        generationConfig: includeSchema ? {
-          responseMimeType: "application/json",
-          responseSchema: RESPONSE_SCHEMA
-        } : undefined
+    // ──────────────── INIT: upload PDFs once + count + return chat seed ────────────────
+    if (action === 'init') {
+      const { qPdfBase64, qMime, sPdfBase64, sMime } = body;
+      if (!qPdfBase64 || !sPdfBase64) {
+        return NextResponse.json({ error: 'Missing PDF data' }, { status: 400 });
+      }
+
+      const [qFile, sFile] = await Promise.all([
+        uploadPdf(ai, qPdfBase64, qMime || 'application/pdf', 'questions.pdf'),
+        uploadPdf(ai, sPdfBase64, sMime || 'application/pdf', 'solutions.pdf'),
+      ]);
+
+      const initialUserTurn = {
+        role: 'user',
+        parts: [
+          { fileData: { fileUri: qFile.uri!, mimeType: qFile.mimeType! } },
+          { fileData: { fileUri: sFile.uri!, mimeType: sFile.mimeType! } },
+          { text: COUNT_PROMPT }
+        ]
       };
 
-      const res = await fetch(VERTEX_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+      const response = await ai.models.generateContent({
+        model: MODEL,
+        contents: [initialUserTurn] as any,
+        config: {
+          systemInstruction,
+          safetySettings: SAFETY_SETTINGS as any,
+        }
       });
 
-      if (!res.ok) {
-        const errorText = await res.text();
-        if (res.status === 401 || res.status === 403) {
-          throw new Error(`Gemini API Error: 401 Unauthorized. Your GEMINI_API_KEY is either missing or invalid in your Vercel Environment Variables. Please check your Vercel Project Settings.`);
-        }
-        throw new Error(`Vertex AI Error: ${res.status} ${res.statusText} - ${errorText}`);
-      }
-
-      const data = await res.json();
-      if (data.candidates && data.candidates.length > 0) {
-        const candidate = data.candidates[0];
-        if (candidate.finishReason === "SAFETY" || candidate.finishReason === "OTHER" || candidate.finishReason === "BLOCKLIST") {
-          throw new Error(`Gemini API Error: Request blocked by Vertex AI. Finish reason: ${candidate.finishReason}`);
-        }
-        if (candidate.content?.parts?.[0]?.text) {
-          return candidate.content.parts[0].text;
-        }
-      }
-      if (data.error) {
-        throw new Error(`Gemini API Error: ${data.error.message || JSON.stringify(data.error)}`);
-      }
-
-      throw new Error(`Vertex AI returned unexpected success payload: ${JSON.stringify(data)}`);
-    };
-
-    // Action 1: Count questions
-    if (action === 'count') {
-      const payloadText = "Analyze the uploaded Question Paper and Solution Paper. How many distinct questions are there? Return ONLY the integer number.";
-      const text = await makeVertexCall(payloadText, false);
+      const text = response.text || '';
       console.log("Count Response string:", text);
       const cleanText = text.replace(/["']/g, '');
       const count = parseInt(cleanText.match(/\d+/)?.[0] || "0", 10);
 
       if (count === 0) {
-        throw new Error(`Failed to parse an integer from Vertex AI response. Raw Response String was: "${text}"`);
+        throw new Error(`Failed to parse an integer from Gemini response. Raw Response String was: "${text}"`);
       }
+
+      const newHistory = [
+        initialUserTurn,
+        { role: 'model', parts: [{ text }] }
+      ];
 
       const scriptUrl = process.env.SHEETS_WEBAPP_URL;
       if (scriptUrl) {
@@ -393,48 +414,50 @@ export async function POST(req: Request) {
         }
       }
 
-      return NextResponse.json({ count });
+      return NextResponse.json({ count, history: newHistory });
     }
 
-    // Action 2: Process a batch
+    // ──────────────── BATCH: continue chat for next variant range ────────────────
     if (action === 'batch') {
-      const prompt = getBatchPrompt(subject, startIndex, startIndex + batchSize - 1);
-      const jsonText = await makeVertexCall(prompt, true);
+      const { startIndex, batchSize, history } = body;
+      if (!Array.isArray(history) || history.length === 0) {
+        return NextResponse.json({ error: 'Missing chat history — call init first' }, { status: 400 });
+      }
 
+      const userTurn = {
+        role: 'user',
+        parts: [{ text: getBatchPrompt(subject, startIndex, startIndex + batchSize - 1) }]
+      };
+
+      const contents = [...history, userTurn];
+
+      const response = await ai.models.generateContent({
+        model: MODEL,
+        contents: contents as any,
+        config: {
+          systemInstruction,
+          safetySettings: SAFETY_SETTINGS as any,
+          responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA as any,
+        }
+      });
+
+      const jsonText = response.text || '[]';
       let cleanJson = jsonText;
       const firstBracket = jsonText.indexOf('[');
       const lastBracket = jsonText.lastIndexOf(']');
-
       if (firstBracket !== -1 && lastBracket !== -1) {
         cleanJson = jsonText.substring(firstBracket, lastBracket + 1);
       }
-
       const rawData = JSON.parse(cleanJson);
+      const processed = processBatchResults(rawData);
 
-      const processed = rawData.map((q: any) => {
-        const optionsMap: Record<string, string> = {};
-        if (q.optionsList && Array.isArray(q.optionsList)) {
-          q.optionsList.forEach((opt: any) => {
-            if (opt.key && opt.value) optionsMap[opt.key] = opt.value;
-          });
-        } else if (q.options && typeof q.options === 'object') {
-          Object.entries(q.options).forEach(([k, v]) => {
-            optionsMap[k] = v as string;
-          });
-        }
+      const newHistory = [
+        ...contents,
+        { role: 'model', parts: [{ text: jsonText }] }
+      ];
 
-        return {
-          originalIndex: q.originalIndex,
-          questionText: q.questionText,
-          type: q.type,
-          options: Object.keys(optionsMap).length > 0 ? optionsMap : undefined,
-          answer: q.answer,
-          solution: q.solution,
-          diagramNote: q.diagramNote
-        };
-      });
-
-      return NextResponse.json({ results: processed });
+      return NextResponse.json({ results: processed, history: newHistory });
     }
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
