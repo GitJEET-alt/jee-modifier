@@ -397,24 +397,12 @@ export async function POST(req: Request) {
         { role: 'model', parts: [{ text }] }
       ];
 
-      const scriptUrl = process.env.SHEETS_WEBAPP_URL;
-      if (scriptUrl) {
-        try {
-          await fetch(scriptUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              email: session.user?.email,
-              subject,
-              totalQuestions: count,
-            }),
-          });
-        } catch (err) {
-          console.error("Usage log failed:", err);
-        }
-      }
+      const usage = {
+        tokens_input: response.usageMetadata?.promptTokenCount || 0,
+        tokens_output: response.usageMetadata?.candidatesTokenCount || 0,
+      };
 
-      return NextResponse.json({ count, history: newHistory });
+      return NextResponse.json({ count, history: newHistory, model: MODEL, usage });
     }
 
     // ──────────────── BATCH: continue chat for next variant range ────────────────
@@ -457,7 +445,41 @@ export async function POST(req: Request) {
         { role: 'model', parts: [{ text: jsonText }] }
       ];
 
-      return NextResponse.json({ results: processed, history: newHistory });
+      const usage = {
+        tokens_input: response.usageMetadata?.promptTokenCount || 0,
+        tokens_output: response.usageMetadata?.candidatesTokenCount || 0,
+      };
+
+      return NextResponse.json({ results: processed, history: newHistory, usage });
+    }
+
+    // ──────────────── LOG: append a usage row at job completion ────────────────
+    if (action === 'log') {
+      const scriptUrl = process.env.SHEETS_WEBAPP_URL;
+      if (!scriptUrl) {
+        return NextResponse.json({ ok: false, error: 'SHEETS_WEBAPP_URL not configured' }, { status: 500 });
+      }
+      const { filename, totalQuestions, tokens_input, tokens_output, model } = body;
+      try {
+        const res = await fetch(scriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: session.user?.email,
+            subject,
+            filename: filename || '',
+            totalQuestions: totalQuestions || '',
+            tokens_input: tokens_input || 0,
+            tokens_output: tokens_output || 0,
+            model: model || '',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        return NextResponse.json({ ok: true, sheet: data });
+      } catch (err: any) {
+        console.error("Usage log failed:", err);
+        return NextResponse.json({ ok: false, error: err.message || String(err) }, { status: 500 });
+      }
     }
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });

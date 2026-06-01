@@ -156,6 +156,10 @@ export default function Home() {
       progress: { ...job.progress, currentAction: 'Uploading PDFs to Gemini and counting questions...' }
     });
 
+    let tokensIn = 0;
+    let tokensOut = 0;
+    let modelUsed = '';
+
     try {
       // 1. Init: upload PDFs once to Gemini File API, get count + chat history seed
       const initData = await safeApiFetch({
@@ -166,6 +170,10 @@ export default function Home() {
         sPdfBase64: job.sFileBase64.data,
         sMime: job.sFileBase64.mimeType,
       });
+
+      tokensIn += initData.usage?.tokens_input || 0;
+      tokensOut += initData.usage?.tokens_output || 0;
+      modelUsed = initData.model || modelUsed;
 
       const totalQ = initData.count;
       let history = initData.history;
@@ -203,6 +211,9 @@ export default function Home() {
 
         if (!batchData.results) throw new Error('Batch failed: no results returned');
 
+        tokensIn += batchData.usage?.tokens_input || 0;
+        tokensOut += batchData.usage?.tokens_output || 0;
+
         history = batchData.history;
         const batchResults = batchData.results || [];
 
@@ -224,6 +235,21 @@ export default function Home() {
           totalQuestions: totalQ, processedCount: totalQ, currentAction: 'Processing Complete!', isComplete: true
         }
       });
+
+      // 3. Log a single usage row for the whole job (fire-and-forget on the user-facing flow)
+      try {
+        await safeApiFetch({
+          action: 'log',
+          subject: job.subject,
+          filename: job.name,
+          totalQuestions: totalQ,
+          tokens_input: tokensIn,
+          tokens_output: tokensOut,
+          model: modelUsed,
+        });
+      } catch (logErr) {
+        console.error("Usage log failed (non-fatal):", logErr);
+      }
 
     } catch (error: any) {
       console.error(error);
