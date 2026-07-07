@@ -289,6 +289,10 @@ const SAFETY_SETTINGS = [
 
 const COUNT_PROMPT = "Analyze the uploaded Question Paper and Solution Paper. How many distinct questions are there? Return ONLY the integer number.";
 
+function geminiSystemInstruction(text: string) {
+  return { parts: [{ text }] };
+}
+
 function getGeminiText(response: any): string {
   if (typeof response?.text === 'string') return response.text;
   const parts = response?.candidates?.[0]?.content?.parts;
@@ -380,10 +384,8 @@ export async function POST(req: Request) {
       model: MODEL,
       request: {
         contents: [initialUserTurn],
-        config: {
-          systemInstruction,
-          safetySettings: SAFETY_SETTINGS,
-        }
+        systemInstruction: geminiSystemInstruction(systemInstruction),
+        safetySettings: SAFETY_SETTINGS,
       },
       filename,
       input_unit: inputUnit,
@@ -424,9 +426,9 @@ export async function POST(req: Request) {
         model: MODEL,
         request: {
           contents,
-          config: {
-            systemInstruction,
-            safetySettings: SAFETY_SETTINGS,
+          systemInstruction: geminiSystemInstruction(systemInstruction),
+          safetySettings: SAFETY_SETTINGS,
+          generationConfig: {
             responseMimeType: 'application/json',
             responseSchema: RESPONSE_SCHEMA,
           }
