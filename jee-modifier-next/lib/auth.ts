@@ -1,12 +1,11 @@
 import { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
+import { checkAllowed } from "@/pw_access.js";
+
+const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
     console.warn("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables.");
-}
-
-if (!process.env.SHEETS_WEBAPP_URL) {
-    console.warn("Missing SHEETS_WEBAPP_URL — sign-in will reject every user until this is set.");
 }
 
 export const authOptions: NextAuthOptions = {
@@ -17,39 +16,43 @@ export const authOptions: NextAuthOptions = {
         }),
     ],
     callbacks: {
-        async signIn({ user }) {
-            if (!user.email) return false;
+        async signIn({ user, account }) {
+            const email = user.email?.toLowerCase();
+            if (!email || !email.endsWith("@pw.live")) return false;
 
-            const scriptUrl = process.env.SHEETS_WEBAPP_URL;
-            if (!scriptUrl) {
-                console.error("SHEETS_WEBAPP_URL not configured — denying access");
+            const googleToken = account?.id_token || account?.access_token;
+            if (!googleToken) {
+                console.error(`No Google token available for ${email}; denying access.`);
                 return false;
             }
 
-            try {
-                const res = await fetch(
-                    `${scriptUrl}?email=${encodeURIComponent(user.email)}`,
-                    { cache: "no-store" }
-                );
-                if (!res.ok) {
-                    console.error(`Whitelist check failed for ${user.email}: HTTP ${res.status}`);
-                    return false;
-                }
-                const data = await res.json();
-                if (data.allowed === true) return true;
-                console.log(`Rejected login from unauthorized email: ${user.email}`);
-                return false;
-            } catch (err) {
-                console.error(`Whitelist check error for ${user.email}:`, err);
-                return false;
-            }
+            if (await checkAllowed(googleToken)) return true;
+            console.log(`Rejected login from unauthorized email: ${email}`);
+            return false;
         },
-        async session({ session, token }) {
+        async jwt({ token, account }) {
+            if (account) {
+                (token as any).googleToken = account.id_token || account.access_token || "";
+            }
+            return token;
+        },
+        async session({ session }) {
+            const email = session.user?.email?.toLowerCase();
+            if (email && !email.endsWith("@pw.live")) {
+                session.user = undefined as any;
+                (session as any).error = "Invalid email domain";
+                return session;
+            }
             return session;
-        }
+        },
     },
     session: {
         strategy: "jwt",
+        maxAge: SESSION_MAX_AGE_SECONDS,
+        updateAge: 24 * 60 * 60,
+    },
+    jwt: {
+        maxAge: SESSION_MAX_AGE_SECONDS,
     },
     pages: {}
 };

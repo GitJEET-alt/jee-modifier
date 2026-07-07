@@ -6,8 +6,8 @@ import SessionProviderContext from '@/components/SessionProviderContext';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-    title: 'JEE Modifier - AI Paper Generator',
-    description: 'Multi-Paper Variant Generator powered by Gemini',
+    title: 'Question Modifier',
+    description: 'Multi-paper variant generator via the PW proxy',
 };
 
 export default function RootLayout({

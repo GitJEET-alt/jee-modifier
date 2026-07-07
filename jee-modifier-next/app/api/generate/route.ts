@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
+import { getToken } from 'next-auth/jwt';
 import { authOptions } from '@/lib/auth';
-import { GoogleGenAI } from '@google/genai';
+import { checkAllowed, geminiGenerate, UsageSession } from '@/pw_access.js';
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // ─── JEE System Instruction ──────────────────────────────────────────────────
 const SYSTEM_INSTRUCTION_JEE = `
@@ -288,28 +289,20 @@ const SAFETY_SETTINGS = [
 
 const COUNT_PROMPT = "Analyze the uploaded Question Paper and Solution Paper. How many distinct questions are there? Return ONLY the integer number.";
 
-async function waitForActive(ai: GoogleGenAI, fileName: string, maxWaitMs = 30000) {
-  const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
-    const file = await ai.files.get({ name: fileName });
-    if (file.state === 'ACTIVE') return file;
-    if (file.state === 'FAILED') {
-      throw new Error(`Gemini rejected uploaded file ${fileName}`);
-    }
-    await new Promise(r => setTimeout(r, 500));
+function getGeminiText(response: any): string {
+  if (typeof response?.text === 'string') return response.text;
+  const parts = response?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    return parts.map((part: any) => part?.text || '').join('');
   }
-  throw new Error(`Gemini file ${fileName} did not become ACTIVE within ${maxWaitMs}ms`);
+  return '';
 }
 
-async function uploadPdf(ai: GoogleGenAI, base64: string, mimeType: string, displayName: string) {
-  const buffer = Buffer.from(base64, 'base64');
-  const blob = new Blob([buffer], { type: mimeType });
-  const uploaded = await ai.files.upload({
-    file: blob,
-    config: { mimeType, displayName }
-  });
-  if (!uploaded.name) throw new Error(`Upload of ${displayName} returned no file name`);
-  return waitForActive(ai, uploaded.name);
+function getUsage(proxyResponse: any, providerResponse: any) {
+  return {
+    tokens_input: proxyResponse?.usage?.tokens_in ?? providerResponse?.usageMetadata?.promptTokenCount ?? 0,
+    tokens_output: proxyResponse?.usage?.tokens_out ?? providerResponse?.usageMetadata?.candidatesTokenCount ?? 0,
+  };
 }
 
 function processBatchResults(rawData: any[]) {
@@ -337,155 +330,154 @@ function processBatchResults(rawData: any[]) {
 }
 
 export async function POST(req: Request) {
+  let usageSession: any = null;
+  let usageFlushed = false;
+
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
+    if (!session?.user?.email) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ error: 'Missing API Key in Environment Variables' }, { status: 500 });
+    const nextAuthToken = await getToken({ req: req as any, secret: process.env.NEXTAUTH_SECRET });
+    const googleToken = typeof (nextAuthToken as any)?.googleToken === 'string'
+      ? (nextAuthToken as any).googleToken
+      : '';
+
+    if (!googleToken) {
+      return NextResponse.json({ error: 'Missing Google token; please sign in again.' }, { status: 401 });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    if (!(await checkAllowed(googleToken))) {
+      return NextResponse.json({ error: 'Not authorized for this app.' }, { status: 403 });
+    }
+
     const body = await req.json();
-    const { action, subject = 'jee' } = body;
+    const { action, subject = 'jee', filename = '' } = body;
+    if (action !== 'process') {
+      return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+    }
+
+    const { qPdfBase64, qMime, sPdfBase64, sMime } = body;
+    if (!qPdfBase64 || !sPdfBase64) {
+      return NextResponse.json({ error: 'Missing PDF data' }, { status: 400 });
+    }
+
     const systemInstruction = getSystemInstruction(subject);
+    const inputUnit = 'No. of questions';
+    usageSession = new UsageSession(googleToken, { filename, input_unit: inputUnit, count: null });
 
-    // ──────────────── INIT: upload PDFs once + count + return chat seed ────────────────
-    if (action === 'init') {
-      const { qPdfBase64, qMime, sPdfBase64, sMime } = body;
-      if (!qPdfBase64 || !sPdfBase64) {
-        return NextResponse.json({ error: 'Missing PDF data' }, { status: 400 });
-      }
+    const initialUserTurn = {
+      role: 'user',
+      parts: [
+        { inlineData: { data: qPdfBase64, mimeType: qMime || 'application/pdf' } },
+        { inlineData: { data: sPdfBase64, mimeType: sMime || 'application/pdf' } },
+        { text: COUNT_PROMPT }
+      ]
+    };
 
-      const [qFile, sFile] = await Promise.all([
-        uploadPdf(ai, qPdfBase64, qMime || 'application/pdf', 'questions.pdf'),
-        uploadPdf(ai, sPdfBase64, sMime || 'application/pdf', 'solutions.pdf'),
-      ]);
-
-      const initialUserTurn = {
-        role: 'user',
-        parts: [
-          { fileData: { fileUri: qFile.uri!, mimeType: qFile.mimeType! } },
-          { fileData: { fileUri: sFile.uri!, mimeType: sFile.mimeType! } },
-          { text: COUNT_PROMPT }
-        ]
-      };
-
-      const response = await ai.models.generateContent({
-        model: MODEL,
-        contents: [initialUserTurn] as any,
+    const countProxyResponse = await geminiGenerate(googleToken, {
+      model: MODEL,
+      request: {
+        contents: [initialUserTurn],
         config: {
           systemInstruction,
-          safetySettings: SAFETY_SETTINGS as any,
+          safetySettings: SAFETY_SETTINGS,
         }
-      });
+      },
+      filename,
+      input_unit: inputUnit,
+      session: usageSession,
+    });
 
-      const text = response.text || '';
-      console.log("Count Response string:", text);
-      const cleanText = text.replace(/["']/g, '');
-      const count = parseInt(cleanText.match(/\d+/)?.[0] || "0", 10);
+    const countProviderResponse = countProxyResponse.result;
+    const countText = getGeminiText(countProviderResponse);
+    console.log("Count Response string:", countText);
+    const cleanCountText = countText.replace(/["']/g, '');
+    const totalQuestions = parseInt(cleanCountText.match(/\d+/)?.[0] || "0", 10);
 
-      if (count === 0) {
-        throw new Error(`Failed to parse an integer from Gemini response. Raw Response String was: "${text}"`);
-      }
-
-      const newHistory = [
-        initialUserTurn,
-        { role: 'model', parts: [{ text }] }
-      ];
-
-      const usage = {
-        tokens_input: response.usageMetadata?.promptTokenCount || 0,
-        tokens_output: response.usageMetadata?.candidatesTokenCount || 0,
-      };
-
-      return NextResponse.json({ count, history: newHistory, model: MODEL, usage });
+    if (totalQuestions === 0) {
+      throw new Error(`Failed to parse an integer from Gemini response. Raw Response String was: "${countText}"`);
     }
 
-    // ──────────────── BATCH: continue chat for next variant range ────────────────
-    if (action === 'batch') {
-      const { startIndex, batchSize, history } = body;
-      if (!Array.isArray(history) || history.length === 0) {
-        return NextResponse.json({ error: 'Missing chat history — call init first' }, { status: 400 });
-      }
+    usageSession.count = totalQuestions;
 
+    let history = [
+      initialUserTurn,
+      { role: 'model', parts: [{ text: countText }] }
+    ];
+    const allResults: any[] = [];
+    let modelUsed = countProxyResponse.model || MODEL;
+    let usage = getUsage(countProxyResponse, countProviderResponse);
+
+    const BATCH_SIZE = 5;
+    let currentIndex = 1;
+
+    while (currentIndex <= totalQuestions) {
       const userTurn = {
         role: 'user',
-        parts: [{ text: getBatchPrompt(subject, startIndex, startIndex + batchSize - 1) }]
+        parts: [{ text: getBatchPrompt(subject, currentIndex, Math.min(currentIndex + BATCH_SIZE - 1, totalQuestions)) }]
       };
 
       const contents = [...history, userTurn];
-
-      const response = await ai.models.generateContent({
+      const batchProxyResponse = await geminiGenerate(googleToken, {
         model: MODEL,
-        contents: contents as any,
-        config: {
-          systemInstruction,
-          safetySettings: SAFETY_SETTINGS as any,
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA as any,
-        }
+        request: {
+          contents,
+          config: {
+            systemInstruction,
+            safetySettings: SAFETY_SETTINGS,
+            responseMimeType: 'application/json',
+            responseSchema: RESPONSE_SCHEMA,
+          }
+        },
+        filename,
+        input_unit: inputUnit,
+        count: totalQuestions as any,
+        session: usageSession,
       });
 
-      const jsonText = response.text || '[]';
+      const batchProviderResponse = batchProxyResponse.result;
+      const jsonText = getGeminiText(batchProviderResponse) || '[]';
       let cleanJson = jsonText;
       const firstBracket = jsonText.indexOf('[');
       const lastBracket = jsonText.lastIndexOf(']');
       if (firstBracket !== -1 && lastBracket !== -1) {
         cleanJson = jsonText.substring(firstBracket, lastBracket + 1);
       }
+
       const rawData = JSON.parse(cleanJson);
       const processed = processBatchResults(rawData);
+      allResults.push(...processed);
 
-      const newHistory = [
+      history = [
         ...contents,
         { role: 'model', parts: [{ text: jsonText }] }
       ];
 
-      const usage = {
-        tokens_input: response.usageMetadata?.promptTokenCount || 0,
-        tokens_output: response.usageMetadata?.candidatesTokenCount || 0,
-      };
+      const batchUsage = getUsage(batchProxyResponse, batchProviderResponse);
+      usage.tokens_input += batchUsage.tokens_input;
+      usage.tokens_output += batchUsage.tokens_output;
+      modelUsed = batchProxyResponse.model || modelUsed;
 
-      return NextResponse.json({ results: processed, history: newHistory, usage });
+      currentIndex += BATCH_SIZE;
     }
 
-    // ──────────────── LOG: append a usage row at job completion ────────────────
-    if (action === 'log') {
-      const scriptUrl = process.env.SHEETS_WEBAPP_URL;
-      if (!scriptUrl) {
-        return NextResponse.json({ ok: false, error: 'SHEETS_WEBAPP_URL not configured' }, { status: 500 });
-      }
-      const { filename, totalQuestions, tokens_input, tokens_output, model } = body;
-      try {
-        const res = await fetch(scriptUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: session.user?.email,
-            subject,
-            filename: filename || '',
-            totalQuestions: totalQuestions || '',
-            tokens_input: tokens_input || 0,
-            tokens_output: tokens_output || 0,
-            model: model || '',
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        return NextResponse.json({ ok: true, sheet: data });
-      } catch (err: any) {
-        console.error("Usage log failed:", err);
-        return NextResponse.json({ ok: false, error: err.message || String(err) }, { status: 500 });
-      }
-    }
+    await usageSession.flush();
+    usageFlushed = true;
 
-    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
-
+    return NextResponse.json({
+      count: totalQuestions,
+      results: allResults,
+      model: modelUsed,
+      usage,
+    });
   } catch (error: any) {
     console.error("API Generate Error:", error);
     return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
+  } finally {
+    if (usageSession && !usageFlushed) {
+      await usageSession.flush();
+    }
   }
 }

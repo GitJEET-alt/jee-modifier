@@ -12,7 +12,7 @@ export default function LoginScreen() {
                         <Layers className="w-10 h-10 text-primary" />
                     </div>
                 </div>
-                <h1 className="text-3xl font-bold text-slate-800 mb-2">JEE Modifier</h1>
+                <h1 className="text-3xl font-bold text-slate-800 mb-2">Question Modifier</h1>
                 <p className="text-slate-500 mb-8">Internal Tool: You must sign in to generate question variants.</p>
 
                 <button

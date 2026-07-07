@@ -153,103 +153,35 @@ export default function Home() {
   const processSingleJob = async (job: PaperJob) => {
     updateJob(job.id, {
       status: 'processing',
-      progress: { ...job.progress, currentAction: 'Uploading PDFs to Gemini and counting questions...' }
+      progress: { ...job.progress, currentAction: 'Submitting PDFs to PW proxy and processing questions...' }
     });
 
-    let tokensIn = 0;
-    let tokensOut = 0;
-    let modelUsed = '';
-
     try {
-      // 1. Init: upload PDFs once to Gemini File API, get count + chat history seed
-      const initData = await safeApiFetch({
-        action: 'init',
+      const processData = await safeApiFetch({
+        action: 'process',
         subject: job.subject,
+        filename: job.name,
         qPdfBase64: job.qFileBase64.data,
         qMime: job.qFileBase64.mimeType,
         sPdfBase64: job.sFileBase64.data,
         sMime: job.sFileBase64.mimeType,
       });
 
-      tokensIn += initData.usage?.tokens_input || 0;
-      tokensOut += initData.usage?.tokens_output || 0;
-      modelUsed = initData.model || modelUsed;
-
-      const totalQ = initData.count;
-      let history = initData.history;
-
+      const totalQ = processData.count;
       if (!totalQ || totalQ === 0) {
         throw new Error("Could not detect any questions. Please ensure the PDF is clear.");
       }
 
       updateJob(job.id, {
-        progress: {
-          ...job.progress, totalQuestions: totalQ, processedCount: 0,
-          currentAction: `Found ${totalQ} questions. Starting batch processing...`
-        }
-      });
-
-      // 2. Batch loop — thread chat history through each call so the model remembers prior batches
-      const BATCH_SIZE = 5;
-      let currentIdx = 1;
-
-      while (currentIdx <= totalQ) {
-        updateJob(job.id, (j) => ({
-          progress: {
-            ...j.progress,
-            currentAction: `Processing questions ${currentIdx} to ${Math.min(currentIdx + BATCH_SIZE - 1, totalQ)} via API...`
-          }
-        }));
-
-        const batchData = await safeApiFetch({
-          action: 'batch',
-          subject: job.subject,
-          startIndex: currentIdx,
-          batchSize: BATCH_SIZE,
-          history,
-        });
-
-        if (!batchData.results) throw new Error('Batch failed: no results returned');
-
-        tokensIn += batchData.usage?.tokens_input || 0;
-        tokensOut += batchData.usage?.tokens_output || 0;
-
-        history = batchData.history;
-        const batchResults = batchData.results || [];
-
-        updateJob(job.id, (j) => ({
-          questions: [...j.questions, ...batchResults],
-          progress: {
-            ...j.progress,
-            processedCount: Math.min(j.progress.processedCount + batchResults.length, totalQ)
-          }
-        }));
-
-        currentIdx += BATCH_SIZE;
-        await new Promise(r => setTimeout(r, 1000));
-      }
-
-      updateJob(job.id, {
+        questions: processData.results || [],
         status: 'completed',
         progress: {
-          totalQuestions: totalQ, processedCount: totalQ, currentAction: 'Processing Complete!', isComplete: true
+          totalQuestions: totalQ,
+          processedCount: (processData.results || []).length,
+          currentAction: 'Processing Complete!',
+          isComplete: true
         }
       });
-
-      // 3. Log a single usage row for the whole job (fire-and-forget on the user-facing flow)
-      try {
-        await safeApiFetch({
-          action: 'log',
-          subject: job.subject,
-          filename: job.name,
-          totalQuestions: totalQ,
-          tokens_input: tokensIn,
-          tokens_output: tokensOut,
-          model: modelUsed,
-        });
-      } catch (logErr) {
-        console.error("Usage log failed (non-fatal):", logErr);
-      }
 
     } catch (error: any) {
       console.error(error);
@@ -299,7 +231,7 @@ export default function Home() {
         <div className="p-6 border-b border-slate-100 flex justify-between items-start">
           <div>
             <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-              <span className="text-primary text-3xl">∑</span> Exam Modifier
+              <span className="text-primary text-3xl">∑</span> Question Modifier
             </h1>
             <p className="text-xs text-slate-500 mt-1">Next.js Secure Variant Generator</p>
           </div>

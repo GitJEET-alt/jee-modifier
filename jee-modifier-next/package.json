@@ -2,6 +2,7 @@
   "name": "jee-modifier-next",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -17,8 +18,7 @@
     "react-markdown": "^9.0.1",
     "remark-math": "^6.0.0",
     "rehype-katex": "^7.0.0",
-    "katex": "^0.16.10",
-    "@google/genai": "^1.31.0"
+    "katex": "^0.16.10"
   },
   "devDependencies": {
     "typescript": "^5",

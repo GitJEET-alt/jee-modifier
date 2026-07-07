@@ -1,4 +1,4 @@
-# How to Run and Deploy JEE Modifier (Next.js)
+# How to Run and Deploy Question Modifier (Next.js)
 
 Since your current machine does not have Node.js installed, I have created all the necessary files for your safe, backend-driven Next.js application in the `jee-modifier-next` folder. 
 
@@ -7,15 +7,18 @@ Here are the exact steps to get this running locally and on the web for free.
 ## Step 1: Install Node.js (If running locally)
 1. Download and install [Node.js](https://nodejs.org/).
 2. Open a terminal inside the `jee-modifier-next` folder.
-3. Run `npm install` to download all the necessary packages (Next.js, NextAuth, Gemini SDK, etc.).
+3. Run `npm install` to download all the necessary packages (Next.js, NextAuth, etc.).
 
 ## Step 2: Configure Environment Variables
 1. Rename the `.env.example` file to `.env.local`.
-2. Open it and fill in the 4 required values:
+2. Open it and fill in the required values:
    - `GOOGLE_CLIENT_ID`
    - `GOOGLE_CLIENT_SECRET`
-   - `ALLOWED_EMAILS` (e.g. `yourname@company.com,other@company.com`)
-   - `GEMINI_API_KEY` (Your paid Gemini API key).
+   - `NEXTAUTH_SECRET`
+   - `NEXTAUTH_URL`
+
+Provider keys are not configured in this app. Gemini, Mathpix, and Sarvam calls
+go through the PW proxy.
 
 ## Step 3: Run Locally
 1. In the terminal, run `npm run dev`.
@@ -43,7 +46,6 @@ To share this with your team safely on the web, follow these steps:
      - `GOOGLE_CLIENT_ID`
      - `GOOGLE_CLIENT_SECRET`
      - `ALLOWED_EMAILS`
-     - `GEMINI_API_KEY`
      - `NEXTAUTH_URL` (Set this to your expected Vercel URL, e.g. `https://jee-modifier.vercel.app`)
      - `NEXTAUTH_SECRET` (A random string to encrypt the sessions)
 
@@ -51,4 +53,4 @@ To share this with your team safely on the web, follow these steps:
    - Click "Deploy". Within a minute, you will get a live URL (e.g., `https://jee-modifier.vercel.app`).
    - Finally, copy that live URL and add `https://jee-modifier.vercel.app/api/auth/callback/google` to your Google Cloud Console "Authorized redirect URIs".
 
-Now, you can send that URL to your teammates. The public will be blocked by the Google Login, and only authorized emails will be let in. Your Gemini API key is safely hidden inside Vercel's encrypted backend!
+Now, you can send that URL to your teammates. The public will be blocked by Google login, only authorized `@pw.live` users will be let in, and provider keys stay on the PW proxy.
