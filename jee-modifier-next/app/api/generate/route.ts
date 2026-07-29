@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth/next';
 import { getToken } from 'next-auth/jwt';
 import { authOptions } from '@/lib/auth';
 import { createGoogleTokenProvider } from '@/lib/googleToken';
-import { checkAllowed, geminiGenerate, UsageSession } from '@/pw_access.js';
+import { checkAllowedStatus, geminiGenerate, UsageSession } from '@/pw_access.js';
 
 export const maxDuration = 300;
 
@@ -356,8 +356,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing Google token; please sign in again.' }, { status: 401 });
     }
 
-    if (!(await checkAllowed(googleToken))) {
-      return NextResponse.json({ error: 'Not authorized for this app.' }, { status: 403 });
+    const allowStatus = await checkAllowedStatus(googleToken);
+    if (allowStatus === 'denied') {
+      return NextResponse.json(
+        { error: 'Not authorized for this app. Ask the admin to add your email to the Question Modifier column of the whitelist sheet.' },
+        { status: 403 }
+      );
+    }
+    if (allowStatus !== 'allowed') {
+      // Fail closed, but say what actually happened: the allowlist check
+      // errored (proxy unreachable or credential rejected), not a real "no".
+      return NextResponse.json(
+        { error: 'Could not verify access — please retry; if it persists, sign out and sign in again.' },
+        { status: 503 }
+      );
     }
 
     const body = await req.json();

@@ -48,12 +48,12 @@ export function createGoogleTokenProvider(jwt: {
             return cached.token;
         }
         if (!refreshToken) {
-            // JWT minted before offline access was enabled: the stored token
-            // may still be inside its first hour, so let it through; once it
-            // dies the proxy rejects it and the user re-signs in (which
-            // stores a refresh token and fixes this permanently).
-            if (cached.token) return cached.token;
-            throw new GoogleTokenError("No Google token available; please sign in again.");
+            // JWT minted before offline access was enabled — no way to
+            // refresh, and the stored token is stale (or of unknown age).
+            // Force a one-time re-login, which stores a refresh token and
+            // fixes this permanently. Returning the stale token instead
+            // would surface as a misleading 403 from the proxy.
+            throw new GoogleTokenError("Google session expired; please sign out and sign in again.");
         }
         cached = {
             token: await refreshGoogleToken(refreshToken),
