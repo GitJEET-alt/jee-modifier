@@ -248,6 +248,9 @@ export default function Home() {
               <span className="text-primary text-3xl">∑</span> Question Modifier
             </h1>
             <p className="text-xs text-slate-500 mt-1">Next.js Secure Variant Generator</p>
+            {process.env.NEXT_PUBLIC_BUILD_VERSION && (
+              <p className="text-[10px] text-slate-300 mt-0.5">{process.env.NEXT_PUBLIC_BUILD_VERSION}</p>
+            )}
           </div>
           <button
             onClick={() => signOut()}
