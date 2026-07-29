@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { useSession, signOut } from 'next-auth/react';
-import { Upload, FileText, Play, AlertCircle, Loader2, CheckCircle2, Plus, Trash2, Layers, Clock, LogOut } from 'lucide-react';
+import { Upload, FileText, Play, AlertCircle, Loader2, CheckCircle2, Plus, Trash2, Layers, Clock, LogOut, Download } from 'lucide-react';
 import { PaperJob } from '@/lib/types';
 import { fileToGenerativePart, generateQuestionFileContent, generateSolutionFileContent, downloadDocFile } from '@/lib/utils';
 import { Preview } from '@/components/Preview';
@@ -29,6 +29,12 @@ const SUBJECT_BADGE: Record<string, string> = {
   'neet-bio': 'NEET · Biology',
 };
 
+// Error carrying the HTTP status, so callers can react to 401 (expired
+// session) differently from other failures. Plain property instead of a
+// subclass so the check doesn't depend on prototype chains.
+const apiError = (message: string, status: number): Error & { status: number } =>
+  Object.assign(new Error(message), { status });
+
 export default function Home() {
   const { data: session, status } = useSession();
 
@@ -37,6 +43,7 @@ export default function Home() {
   const [stageQ, setStageQ] = useState<File | null>(null);
   const [stageS, setStageS] = useState<File | null>(null);
   const [isQueueRunning, setIsQueueRunning] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   // Exam + Subject selection state
   const [selectedExam, setSelectedExam] = useState<'jee' | 'neet' | null>(null);
@@ -131,26 +138,23 @@ export default function Home() {
     if (!res.ok) {
       // Detect Vercel body-size limit
       if (res.status === 413 || text.toLowerCase().includes('request entity too large') || text.toLowerCase().includes('payload too large')) {
-        throw new Error('PDFs are too large for the server (4.5 MB limit). Please use smaller / compressed PDFs.');
+        throw apiError('PDFs are too large for the server (4.5 MB limit). Please use smaller / compressed PDFs.', res.status);
       }
-      // Try to extract a JSON error message
-      try {
-        const json = JSON.parse(text);
-        throw new Error(json.error || `API Error ${res.status}`);
-      } catch (parseErr: any) {
-        if (parseErr.message.startsWith('PDFs are too large') || parseErr.message.startsWith('API Error')) throw parseErr;
-        throw new Error(`Server Error ${res.status}: ${text.substring(0, 200)}`);
-      }
+      // Prefer the server's JSON error message; fall back to the raw body
+      let message = '';
+      try { message = JSON.parse(text).error || ''; } catch { /* body was not JSON */ }
+      throw apiError(message || `Server error ${res.status}: ${text.substring(0, 200)}`, res.status);
     }
 
     try {
       return JSON.parse(text);
     } catch {
-      throw new Error(`Invalid response from server: ${text.substring(0, 200)}`);
+      throw apiError(`Invalid response from server: ${text.substring(0, 200)}`, res.status);
     }
   };
 
-  const processSingleJob = async (job: PaperJob) => {
+  // Returns false when the queue should stop (expired session).
+  const processSingleJob = async (job: PaperJob): Promise<boolean> => {
     updateJob(job.id, {
       status: 'processing',
       progress: { ...job.progress, currentAction: 'Submitting PDFs to PW proxy and processing questions...' }
@@ -185,11 +189,20 @@ export default function Home() {
 
     } catch (error: any) {
       console.error(error);
+      if (error?.status === 401) {
+        updateJob(job.id, {
+          status: 'error',
+          progress: { ...job.progress, error: 'Session expired — sign in again to continue.' }
+        });
+        setSessionExpired(true);
+        return false;
+      }
       updateJob(job.id, {
         status: 'error',
         progress: { ...job.progress, error: error.message || "An unexpected error occurred." }
       });
     }
+    return true;
   };
 
   const startQueue = async () => {
@@ -199,7 +212,8 @@ export default function Home() {
     for (const id of pendingIds) {
       const currentJob = jobs.find(j => j.id === id);
       if (currentJob && currentJob.status === 'pending') {
-        await processSingleJob(currentJob);
+        const shouldContinue = await processSingleJob(currentJob);
+        if (!shouldContinue) break;
       }
     }
     setIsQueueRunning(false);
@@ -390,15 +404,17 @@ export default function Home() {
                       <div className="flex gap-2 mt-3 pt-2 border-t border-slate-100">
                         <button
                           onClick={(e) => { e.stopPropagation(); handleDownload(job.id, 'questions'); }}
-                          className="flex-1 py-1 text-[10px] font-bold bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded flex items-center justify-center gap-1"
+                          title="Download the modified question paper as a Word file"
+                          className="flex-1 py-1.5 text-[10px] font-bold bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded flex items-center justify-center gap-1"
                         >
-                          <FileText className="w-3 h-3" /> Q
+                          <Download className="w-3 h-3" /> Questions
                         </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); handleDownload(job.id, 'solutions'); }}
-                          className="flex-1 py-1 text-[10px] font-bold bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded flex items-center justify-center gap-1"
+                          title="Download the modified solutions as a Word file"
+                          className="flex-1 py-1.5 text-[10px] font-bold bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded flex items-center justify-center gap-1"
                         >
-                          <FileText className="w-3 h-3" /> Sol
+                          <Download className="w-3 h-3" /> Solutions
                         </button>
                       </div>
                     )}
@@ -442,6 +458,24 @@ export default function Home() {
             ) : "Preview Area"}
           </h2>
           <div className="text-xs flex items-center gap-4">
+            {selectedJob?.status === 'completed' && selectedJob.questions.length > 0 && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleDownload(selectedJob.id, 'questions')}
+                  title="Download the modified question paper as a Word file"
+                  className="bg-primary hover:bg-blue-600 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 shadow-sm transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" /> Questions (.doc)
+                </button>
+                <button
+                  onClick={() => handleDownload(selectedJob.id, 'solutions')}
+                  title="Download the modified solutions as a Word file"
+                  className="bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 shadow-sm transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" /> Solutions (.doc)
+                </button>
+              </div>
+            )}
             <span className="text-slate-500 font-medium">{session?.user?.email}</span>
           </div>
         </header>
@@ -465,6 +499,33 @@ export default function Home() {
           )}
         </main>
       </div>
+
+      {sessionExpired && (
+        <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full text-center space-y-4">
+            <AlertCircle className="w-10 h-10 text-amber-500 mx-auto" />
+            <h3 className="text-lg font-bold text-slate-800">Your session has expired</h3>
+            <p className="text-sm text-slate-500">
+              Processing has been stopped. Sign in again to continue.
+              Papers that already finished can still be downloaded — dismiss
+              this notice first if you need them, because signing in clears
+              the queue.
+            </p>
+            <button
+              onClick={() => signOut()}
+              className="w-full bg-primary hover:bg-blue-600 text-white py-2.5 rounded-lg font-bold flex items-center justify-center gap-2 transition-colors"
+            >
+              <LogOut className="w-4 h-4" /> Sign in again
+            </button>
+            <button
+              onClick={() => setSessionExpired(false)}
+              className="w-full text-xs text-slate-400 hover:text-slate-600 transition-colors"
+            >
+              Dismiss for now
+            </button>
+          </div>
+        </div>
+      )}
     </div >
   );
 }

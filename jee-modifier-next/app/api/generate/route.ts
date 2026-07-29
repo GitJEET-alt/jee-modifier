@@ -353,7 +353,7 @@ export async function POST(req: Request) {
     try {
       await googleToken();
     } catch {
-      return NextResponse.json({ error: 'Missing Google token; please sign in again.' }, { status: 401 });
+      return NextResponse.json({ error: 'Your session has expired. Please sign in again.' }, { status: 401 });
     }
 
     const allowStatus = await checkAllowedStatus(googleToken);
