@@ -30,7 +30,7 @@
 
 // --- PER-APP CONFIG — the only thing each app changes ---------------------
 // APP_NAME must EXACTLY match a header in row 1 of the `Whitelisted` tab.
-export const APP_NAME = "Question Modifier";
+export const APP_NAME = "Final ZIP Package";
 export const PROXY_BASE_URL = "https://pw-apps-proxy.vercel.app";
 
 const TIMEOUT_MS = 30_000;      // allowlist / logging

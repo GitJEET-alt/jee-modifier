@@ -13,6 +13,13 @@ export const authOptions: NextAuthOptions = {
         GoogleProvider({
             clientId: process.env.GOOGLE_CLIENT_ID || "",
             clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+            // Offline access issues a refresh token, so API routes can mint a
+            // fresh Google token after the ~1-hour id_token expires (the
+            // session itself lasts 7 days). "consent" is required or Google
+            // only returns the refresh token on the very first authorization.
+            authorization: {
+                params: { access_type: "offline", prompt: "consent" },
+            },
         }),
     ],
     callbacks: {
@@ -33,6 +40,11 @@ export const authOptions: NextAuthOptions = {
         async jwt({ token, account }) {
             if (account) {
                 (token as any).googleToken = account.id_token || account.access_token || "";
+                (token as any).googleTokenExpiry = account.expires_at
+                    ? account.expires_at * 1000
+                    : Date.now() + 3600 * 1000;
+                (token as any).googleRefreshToken =
+                    account.refresh_token || (token as any).googleRefreshToken || "";
             }
             return token;
         },

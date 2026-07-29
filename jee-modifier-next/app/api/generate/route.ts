@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
 import { getToken } from 'next-auth/jwt';
 import { authOptions } from '@/lib/auth';
+import { createGoogleTokenProvider } from '@/lib/googleToken';
 import { checkAllowed, geminiGenerate, UsageSession } from '@/pw_access.js';
 
 export const maxDuration = 300;
@@ -344,11 +345,14 @@ export async function POST(req: Request) {
     }
 
     const nextAuthToken = await getToken({ req: req as any, secret: process.env.NEXTAUTH_SECRET });
-    const googleToken = typeof (nextAuthToken as any)?.googleToken === 'string'
-      ? (nextAuthToken as any).googleToken
-      : '';
+    // Token provider, not a string: pw_access calls it whenever it needs a
+    // live Google token, and it refreshes via the stored refresh token — so
+    // requests hours after sign-in (or on cold instances) still work.
+    const googleToken = createGoogleTokenProvider((nextAuthToken as any) || {});
 
-    if (!googleToken) {
+    try {
+      await googleToken();
+    } catch {
       return NextResponse.json({ error: 'Missing Google token; please sign in again.' }, { status: 401 });
     }
 
