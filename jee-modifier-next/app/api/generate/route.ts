@@ -279,7 +279,15 @@ const RESPONSE_SCHEMA = {
   }
 };
 
-const MODEL = 'gemini-2.5-pro';
+// Two-model split: a fast flash model counts the questions (perception, no
+// deep reasoning), the pro model does the actual modification (recomputing
+// answers must not be economized). Env-overridable so a bad preview rollout
+// can be reverted from Vercel settings without a code change.
+const COUNT_MODEL = process.env.COUNT_MODEL || 'gemini-3.5-flash';
+const BATCH_MODEL = process.env.BATCH_MODEL || 'gemini-3.1-pro-preview';
+// Gemini 3.x thinking control (thinkingLevel replaces 2.5's thinkingBudget).
+const COUNT_THINKING_LEVEL = process.env.COUNT_THINKING_LEVEL || 'low';
+const BATCH_THINKING_LEVEL = process.env.BATCH_THINKING_LEVEL || 'high';
 
 const SAFETY_SETTINGS = [
   { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
@@ -397,11 +405,14 @@ export async function POST(req: Request) {
     };
 
     const countProxyResponse = await geminiGenerate(googleToken, {
-      model: MODEL,
+      model: COUNT_MODEL,
       request: {
         contents: [initialUserTurn],
         systemInstruction: geminiSystemInstruction(systemInstruction),
         safetySettings: SAFETY_SETTINGS,
+        generationConfig: {
+          thinkingConfig: { thinkingLevel: COUNT_THINKING_LEVEL },
+        },
       },
       filename,
       input_unit: inputUnit,
@@ -425,7 +436,7 @@ export async function POST(req: Request) {
       { role: 'model', parts: [{ text: countText }] }
     ];
     const allResults: any[] = [];
-    let modelUsed = countProxyResponse.model || MODEL;
+    let modelUsed = countProxyResponse.model || COUNT_MODEL;
     let usage = getUsage(countProxyResponse, countProviderResponse);
 
     const BATCH_SIZE = 5;
@@ -439,7 +450,7 @@ export async function POST(req: Request) {
 
       const contents = [...history, userTurn];
       const batchProxyResponse = await geminiGenerate(googleToken, {
-        model: MODEL,
+        model: BATCH_MODEL,
         request: {
           contents,
           systemInstruction: geminiSystemInstruction(systemInstruction),
@@ -447,6 +458,7 @@ export async function POST(req: Request) {
           generationConfig: {
             responseMimeType: 'application/json',
             responseSchema: RESPONSE_SCHEMA,
+            thinkingConfig: { thinkingLevel: BATCH_THINKING_LEVEL },
           }
         },
         filename,
