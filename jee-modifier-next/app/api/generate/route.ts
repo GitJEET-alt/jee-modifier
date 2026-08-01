@@ -58,7 +58,13 @@ You are an expert JEE-level question-writer. Your task is to generate FRESH VARI
    - Visually scan the original question for any figures, graphs, circuits, or diagrams.
    - If a diagram exists, you **MUST** provide a 'diagramNote' describing exactly how to redraw it with the NEW modified values.
    - DO NOT SKIP THIS if a diagram is present in the original.
-8. OUTPUT: Strict JSON. Follow the original question numbering.
+8. OPTIONS / DISTRACTORS (DESIGN, do not copy):
+   - Design each wrong option as a specific, plausible student error — you must be able to say "a student picks this if they ___". Do NOT reword the original paper's options.
+   - Preferred error types: the intermediate value (correct work, stopped one step early); missing/extra factor (½, 2, cos θ); sign or reciprocal flip (series/parallel swapped); the one-step-away operation (derivative when integral was asked); extraneous/lost root; complementary answer (1 − p).
+   - Numeric options: same order of magnitude and significant figures, sorted ascending, no obvious outlier.
+   - Keep all 4 options parallel in length and grammar. Never use "all/none of the above". No option may be a subset or paraphrase of another.
+   - SELF-CHECK before finalizing each question: exactly one option matches the computed answer; every distractor is definitively wrong and corresponds to a specific error; nothing is outside the syllabus.
+9. OUTPUT: Strict JSON. Follow the original question numbering.
 
 For MCQs, you MUST populate the 'optionsList' array.
 `;
@@ -75,7 +81,7 @@ REMINDERS:
     2. MODIFY the content of ALL list entries (P,Q,R,S vs 1,2,3,4).
     3. **CRITICAL**: You MUST write out the FULL CONTENT of List-I and List-II inside 'questionText'. Use **List-I** and **List-II** headers. Do NOT omit them.
 - **Diagrams**: If the original question contains ANY diagram/graph, you **MUST** include a 'diagramNote'.
-- **MCQ Options**: MANDATORY. If the original question had options, you MUST generate modified options. Do NOT skip them.
+- **MCQ Options**: MANDATORY. Generate 4 NEWLY DESIGNED options — each distractor a specific plausible student error (intermediate value, sign/factor slip, one-step-away operation). Do NOT reword the original options. Exactly one option must match the computed answer.
 - **Solutions**: STRICTLY LIMIT solution to 4-5 sentences max. Be concise.
 
 Return valid JSON.
@@ -137,7 +143,14 @@ You are an expert NEET-UG question-writer for PHYSICS and CHEMISTRY, aligned to 
    - Visually scan the original question for any figures, graphs, circuits, or diagrams.
    - If a diagram exists, you MUST provide a 'diagramNote' describing exactly how to redraw it with NEW modified values (or retained values if they were factual).
    - DO NOT SKIP THIS if a diagram is present.
-9. OUTPUT:
+9. OPTIONS / DISTRACTORS (DESIGN, do not copy):
+   - Design each wrong option as a specific, plausible student error — you must be able to say "a student picks this if they ___". Do NOT reword the original paper's options.
+   - Physics error types: the intermediate value (correct work, stopped one step early); missing/extra factor (½, 2, cos θ); sign or direction flip; reciprocal error (series/parallel swapped).
+   - Chemistry error types: n-factor forgotten; °C not converted to K; molarity/molality swap; Markovnikov vs anti-Markovnikov (or unrearranged carbocation) product; the product of a closely related reagent; the neighbouring element in the group; the general trend where the question tests the exception.
+   - Numeric options: same order of magnitude and significant figures, sorted ascending, no obvious outlier.
+   - Keep all 4 options parallel in length and grammar. Never use "all/none of the above". No option may be a subset or paraphrase of another.
+   - SELF-CHECK before finalizing each question: exactly one option matches the computed answer; every distractor is definitively wrong and corresponds to a specific error; nothing is outside NEET scope.
+10. OUTPUT:
    - Strict JSON only. Follow the original question numbering (originalIndex).
    - For MCQs, you MUST populate the 'optionsList' array.
 `;
@@ -155,7 +168,7 @@ REMINDERS:
   2. MODIFY content of ALL list entries (P,Q,R,S vs 1,2,3,4).
   3. Write FULL List-I and List-II inside 'questionText' with **List-I** and **List-II** headers (NO tables).
 - Diagrams: If the original question contains ANY diagram/graph, you MUST include a 'diagramNote'.
-- MCQ Options: If the original question had options, you MUST generate 4 modified options. Do NOT skip them.
+- MCQ Options: Generate 4 NEWLY DESIGNED options — each distractor a specific plausible student error (intermediate value, factor/sign slip, wrong-reagent product). Do NOT reword the original options. Exactly one option must match the computed answer.
 - Solutions: STRICTLY LIMIT solution to 4-5 sentences max.
 
 Return valid JSON only.
@@ -261,7 +274,7 @@ const RESPONSE_SCHEMA = {
       optionsList: {
         type: "ARRAY",
         nullable: true,
-        description: "MANDATORY for MCQ/MSQ. Must contain all options (A,B,C,D) with modified values.",
+        description: "MANDATORY for MCQ/MSQ. Must contain all 4 options (A,B,C,D) consistent with the modified question.",
         items: {
           type: "OBJECT",
           properties: {
