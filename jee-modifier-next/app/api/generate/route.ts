@@ -297,7 +297,9 @@ const RESPONSE_SCHEMA = {
 // answers must not be economized). Env-overridable so a bad preview rollout
 // can be reverted from Vercel settings without a code change.
 const COUNT_MODEL = process.env.COUNT_MODEL || 'gemini-3.5-flash';
-const BATCH_MODEL = process.env.BATCH_MODEL || 'gemini-3.1-pro';
+// NOTE: per the gateway's model support matrix, Gemini 3.1 Pro is registered
+// as `gemini-3.1-pro-preview` — the bare `gemini-3.1-pro` ID 404s at Vertex.
+const BATCH_MODEL = process.env.BATCH_MODEL || 'gemini-3.1-pro-preview';
 // Gemini 3.x thinking control (thinkingLevel replaces 2.5's thinkingBudget).
 // An EMPTY level omits the parameter entirely — needed because the gateway's
 // LiteLLM rejects thinking params for models missing from its capability
