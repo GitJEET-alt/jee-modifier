@@ -299,8 +299,16 @@ const RESPONSE_SCHEMA = {
 const COUNT_MODEL = process.env.COUNT_MODEL || 'gemini-3.5-flash';
 const BATCH_MODEL = process.env.BATCH_MODEL || 'gemini-3.1-pro';
 // Gemini 3.x thinking control (thinkingLevel replaces 2.5's thinkingBudget).
-const COUNT_THINKING_LEVEL = process.env.COUNT_THINKING_LEVEL || 'low';
-const BATCH_THINKING_LEVEL = process.env.BATCH_THINKING_LEVEL || 'high';
+// An EMPTY level omits the parameter entirely — needed because the gateway's
+// LiteLLM rejects thinking params for models missing from its capability
+// table (gemini-3.1-pro GA today); the model then uses its own default
+// dynamic thinking. Restore explicit control via env once the gateway's
+// LiteLLM is upgraded.
+const COUNT_THINKING_LEVEL = process.env.COUNT_THINKING_LEVEL ?? 'low';
+const BATCH_THINKING_LEVEL = process.env.BATCH_THINKING_LEVEL ?? '';
+
+const thinkingConfigOrNone = (level: string) =>
+  level ? { thinkingConfig: { thinkingLevel: level } } : {};
 
 const SAFETY_SETTINGS = [
   { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
@@ -439,7 +447,7 @@ export async function POST(req: Request) {
           systemInstruction: geminiSystemInstruction(systemInstruction),
           safetySettings: SAFETY_SETTINGS,
           generationConfig: {
-            thinkingConfig: { thinkingLevel: COUNT_THINKING_LEVEL },
+            ...thinkingConfigOrNone(COUNT_THINKING_LEVEL),
           },
         },
         filename,
@@ -494,7 +502,7 @@ export async function POST(req: Request) {
           generationConfig: {
             responseMimeType: 'application/json',
             responseSchema: RESPONSE_SCHEMA,
-            thinkingConfig: { thinkingLevel: BATCH_THINKING_LEVEL },
+            ...thinkingConfigOrNone(BATCH_THINKING_LEVEL),
           }
         },
         filename,
