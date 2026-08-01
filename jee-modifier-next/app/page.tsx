@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { useSession, signOut } from 'next-auth/react';
 import { Upload, FileText, Play, AlertCircle, Loader2, CheckCircle2, Plus, Trash2, Layers, Clock, LogOut, Download } from 'lucide-react';
-import { PaperJob } from '@/lib/types';
+import { PaperJob, ProcessedQuestion } from '@/lib/types';
 import { fileToGenerativePart, generateQuestionFileContent, generateSolutionFileContent, downloadDocFile } from '@/lib/utils';
 import { Preview } from '@/components/Preview';
 import LoginScreen from '@/components/Login';
@@ -34,6 +34,14 @@ const SUBJECT_BADGE: Record<string, string> = {
 // subclass so the check doesn't depend on prototype chains.
 const apiError = (message: string, status: number): Error & { status: number } =>
   Object.assign(new Error(message), { status });
+
+// Must match BATCH_SIZE in app/api/generate/route.ts
+const BATCH_SIZE = 5;
+
+// Keep each batch request under Vercel's 4.5 MB body cap: the PDFs are fixed
+// cost, so when the echoed-back batch history outgrows what's left of this
+// budget, the oldest entries are dropped first (older context matters least).
+const REQUEST_BYTE_BUDGET = 4_200_000;
 
 export default function Home() {
   const { data: session, status } = useSession();
@@ -157,31 +165,80 @@ export default function Home() {
   const processSingleJob = async (job: PaperJob): Promise<boolean> => {
     updateJob(job.id, {
       status: 'processing',
-      progress: { ...job.progress, currentAction: 'Submitting PDFs to PW proxy and processing questions...' }
+      progress: { ...job.progress, currentAction: 'Counting questions in the paper...' }
     });
 
     try {
-      const processData = await safeApiFetch({
-        action: 'process',
+      const base = {
         subject: job.subject,
         filename: job.name,
         qPdfBase64: job.qFileBase64.data,
         qMime: job.qFileBase64.mimeType,
         sPdfBase64: job.sFileBase64.data,
         sMime: job.sFileBase64.mimeType,
-      });
+      };
 
-      const totalQ = processData.count;
+      const countData = await safeApiFetch({ action: 'count', ...base });
+      const totalQ = countData.totalQuestions;
       if (!totalQ || totalQ === 0) {
         throw new Error("Could not detect any questions. Please ensure the PDF is clear.");
       }
+      const countText = countData.countText || String(totalQ);
 
       updateJob(job.id, {
-        questions: processData.results || [],
+        progress: {
+          totalQuestions: totalQ,
+          processedCount: 0,
+          currentAction: `Found ${totalQ} questions. Modifying...`,
+          isComplete: false
+        }
+      });
+
+      // One short request per batch of 5 — no single request can outlive the
+      // server's time limit, the progress bar tracks real completion, and a
+      // failure costs one batch, not the paper.
+      const allResults: ProcessedQuestion[] = [];
+      const history: { start: number; end: number; jsonText: string }[] = [];
+      const pdfBytes = base.qPdfBase64.length + base.sPdfBase64.length;
+
+      for (let start = 1; start <= totalQ; start += BATCH_SIZE) {
+        const end = Math.min(start + BATCH_SIZE - 1, totalQ);
+        updateJob(job.id, (j) => ({
+          progress: { ...j.progress, currentAction: `Modifying questions ${start}–${end} of ${totalQ}...` }
+        }));
+
+        const historyBudget = Math.max(REQUEST_BYTE_BUDGET - pdfBytes, 0);
+        while (history.length && history.reduce((n, h) => n + h.jsonText.length, 0) > historyBudget) {
+          history.shift();
+        }
+
+        const payload = { action: 'batch', ...base, totalQuestions: totalQ, countText, startIndex: start, history };
+        let batchData: any;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            batchData = await safeApiFetch(payload);
+            break;
+          } catch (err: any) {
+            // one automatic retry per batch for transient failures; auth
+            // problems (401/403) must surface immediately
+            if (err?.status === 401 || err?.status === 403 || attempt >= 1) throw err;
+            await new Promise(r => setTimeout(r, 2500));
+          }
+        }
+
+        allResults.push(...(batchData.results || []));
+        history.push({ start, end, jsonText: batchData.jsonText || '[]' });
+        updateJob(job.id, (j) => ({
+          questions: [...allResults],
+          progress: { ...j.progress, processedCount: allResults.length }
+        }));
+      }
+
+      updateJob(job.id, {
         status: 'completed',
         progress: {
           totalQuestions: totalQ,
-          processedCount: (processData.results || []).length,
+          processedCount: allResults.length,
           currentAction: 'Processing Complete!',
           isComplete: true
         }

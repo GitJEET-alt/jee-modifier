@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth/next';
 import { getToken } from 'next-auth/jwt';
 import { authOptions } from '@/lib/auth';
 import { createGoogleTokenProvider, GoogleTokenError } from '@/lib/googleToken';
-import { checkAllowedStatus, geminiGenerate, UsageSession, PWAccessError } from '@/pw_access.js';
+import { checkAllowedStatus, geminiGenerate, PWAccessError } from '@/pw_access.js';
 
 export const maxDuration = 300;
 
@@ -333,13 +333,6 @@ async function withNetworkRetry<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-function getUsage(proxyResponse: any, providerResponse: any) {
-  return {
-    tokens_input: proxyResponse?.usage?.tokens_in ?? providerResponse?.usageMetadata?.promptTokenCount ?? 0,
-    tokens_output: proxyResponse?.usage?.tokens_out ?? providerResponse?.usageMetadata?.candidatesTokenCount ?? 0,
-  };
-}
-
 function processBatchResults(rawData: any[]) {
   return rawData.map((q: any) => {
     const optionsMap: Record<string, string> = {};
@@ -364,10 +357,9 @@ function processBatchResults(rawData: any[]) {
   });
 }
 
-export async function POST(req: Request) {
-  let usageSession: any = null;
-  let usageFlushed = false;
+const BATCH_SIZE = 5;
 
+export async function POST(req: Request) {
   try {
     const session = await getServerSession(authOptions);
     if (!session?.user?.email) {
@@ -404,10 +396,6 @@ export async function POST(req: Request) {
 
     const body = await req.json();
     const { action, subject = 'jee', filename = '' } = body;
-    if (action !== 'process') {
-      return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
-    }
-
     const { qPdfBase64, qMime, sPdfBase64, sMime } = body;
     if (!qPdfBase64 || !sPdfBase64) {
       return NextResponse.json({ error: 'Missing PDF data' }, { status: 400 });
@@ -415,8 +403,12 @@ export async function POST(req: Request) {
 
     const systemInstruction = getSystemInstruction(subject);
     const inputUnit = 'No. of questions';
-    usageSession = new UsageSession(googleToken, { filename, input_unit: inputUnit, count: null });
 
+    // One paper is processed across MANY short requests — one 'count', then
+    // one 'batch' per 5 questions — driven by the browser, so no single
+    // request has to outlive Vercel's function time cap. Without a
+    // UsageSession, each call self-logs to Usage Cost as it happens, so even
+    // an abandoned run accounts for what it spent.
     const initialUserTurn = {
       role: 'user',
       parts: [
@@ -426,51 +418,60 @@ export async function POST(req: Request) {
       ]
     };
 
-    const countProxyResponse = await withNetworkRetry(() => geminiGenerate(googleToken, {
-      model: COUNT_MODEL,
-      request: {
-        contents: [initialUserTurn],
-        systemInstruction: geminiSystemInstruction(systemInstruction),
-        safetySettings: SAFETY_SETTINGS,
-        generationConfig: {
-          thinkingConfig: { thinkingLevel: COUNT_THINKING_LEVEL },
+    if (action === 'count') {
+      const countProxyResponse = await withNetworkRetry(() => geminiGenerate(googleToken, {
+        model: COUNT_MODEL,
+        request: {
+          contents: [initialUserTurn],
+          systemInstruction: geminiSystemInstruction(systemInstruction),
+          safetySettings: SAFETY_SETTINGS,
+          generationConfig: {
+            thinkingConfig: { thinkingLevel: COUNT_THINKING_LEVEL },
+          },
         },
-      },
-      filename,
-      input_unit: inputUnit,
-      session: usageSession,
-    }));
+        filename,
+        input_unit: inputUnit,
+      }));
 
-    const countProviderResponse = countProxyResponse.result;
-    const countText = getGeminiText(countProviderResponse);
-    console.log("Count Response string:", countText);
-    const cleanCountText = countText.replace(/["']/g, '');
-    const totalQuestions = parseInt(cleanCountText.match(/\d+/)?.[0] || "0", 10);
-
-    if (totalQuestions === 0) {
-      throw new Error(`Failed to parse an integer from Gemini response. Raw Response String was: "${countText}"`);
+      const countText = getGeminiText(countProxyResponse.result);
+      console.log("Count Response string:", countText);
+      const totalQuestions = parseInt(countText.replace(/["']/g, '').match(/\d+/)?.[0] || "0", 10);
+      if (totalQuestions === 0) {
+        throw new Error(`Failed to parse an integer from Gemini response. Raw Response String was: "${countText.slice(0, 200)}"`);
+      }
+      return NextResponse.json({ totalQuestions, countText });
     }
 
-    usageSession.count = totalQuestions;
+    if (action === 'batch') {
+      const totalQuestions = Number(body.totalQuestions);
+      const startIndex = Number(body.startIndex);
+      if (!Number.isInteger(totalQuestions) || totalQuestions < 1 || totalQuestions > 1000
+        || !Number.isInteger(startIndex) || startIndex < 1 || startIndex > totalQuestions) {
+        return NextResponse.json({ error: 'Invalid batch range' }, { status: 400 });
+      }
+      const endIndex = Math.min(startIndex + BATCH_SIZE - 1, totalQuestions);
+      const countText = typeof body.countText === 'string' && body.countText
+        ? body.countText
+        : String(totalQuestions);
 
-    let history = [
-      initialUserTurn,
-      { role: 'model', parts: [{ text: countText }] }
-    ];
-    const allResults: any[] = [];
-    let modelUsed = countProxyResponse.model || COUNT_MODEL;
-    let usage = getUsage(countProxyResponse, countProviderResponse);
+      // Rebuild the conversation: PDFs + count exchange, then the prior
+      // batches the client echoes back (so the model still sees its earlier
+      // output — the same context the old single-request loop accumulated),
+      // then this batch's instruction. Malformed history entries are skipped.
+      const contents: any[] = [
+        initialUserTurn,
+        { role: 'model', parts: [{ text: countText }] },
+      ];
+      const history = Array.isArray(body.history) ? body.history : [];
+      for (const h of history) {
+        const hs = Number(h?.start);
+        const he = Number(h?.end);
+        if (!Number.isInteger(hs) || !Number.isInteger(he) || typeof h?.jsonText !== 'string') continue;
+        contents.push({ role: 'user', parts: [{ text: getBatchPrompt(subject, hs, he) }] });
+        contents.push({ role: 'model', parts: [{ text: h.jsonText }] });
+      }
+      contents.push({ role: 'user', parts: [{ text: getBatchPrompt(subject, startIndex, endIndex) }] });
 
-    const BATCH_SIZE = 5;
-    let currentIndex = 1;
-
-    while (currentIndex <= totalQuestions) {
-      const userTurn = {
-        role: 'user',
-        parts: [{ text: getBatchPrompt(subject, currentIndex, Math.min(currentIndex + BATCH_SIZE - 1, totalQuestions)) }]
-      };
-
-      const contents = [...history, userTurn];
       const batchProxyResponse = await withNetworkRetry(() => geminiGenerate(googleToken, {
         model: BATCH_MODEL,
         request: {
@@ -486,50 +487,24 @@ export async function POST(req: Request) {
         filename,
         input_unit: inputUnit,
         count: totalQuestions as any,
-        session: usageSession,
       }));
 
-      const batchProviderResponse = batchProxyResponse.result;
-      const jsonText = getGeminiText(batchProviderResponse) || '[]';
+      const jsonText = getGeminiText(batchProxyResponse.result) || '[]';
       let cleanJson = jsonText;
       const firstBracket = jsonText.indexOf('[');
       const lastBracket = jsonText.lastIndexOf(']');
       if (firstBracket !== -1 && lastBracket !== -1) {
         cleanJson = jsonText.substring(firstBracket, lastBracket + 1);
       }
-
-      const rawData = JSON.parse(cleanJson);
-      const processed = processBatchResults(rawData);
-      allResults.push(...processed);
-
-      history = [
-        ...contents,
-        { role: 'model', parts: [{ text: jsonText }] }
-      ];
-
-      const batchUsage = getUsage(batchProxyResponse, batchProviderResponse);
-      usage.tokens_input += batchUsage.tokens_input;
-      usage.tokens_output += batchUsage.tokens_output;
-      modelUsed = batchProxyResponse.model || modelUsed;
-
-      currentIndex += BATCH_SIZE;
+      const results = processBatchResults(JSON.parse(cleanJson));
+      return NextResponse.json({ results, jsonText });
     }
 
-    await usageSession.flush();
-    usageFlushed = true;
-
-    return NextResponse.json({
-      count: totalQuestions,
-      results: allResults,
-      model: modelUsed,
-      usage,
-    });
+    // Unknown action — includes the old single-request 'process' from tabs
+    // opened before this deploy.
+    return NextResponse.json({ error: 'Please refresh the page — the app was updated.' }, { status: 400 });
   } catch (error: any) {
     console.error("API Generate Error:", error);
     return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
-  } finally {
-    if (usageSession && !usageFlushed) {
-      await usageSession.flush();
-    }
   }
 }
