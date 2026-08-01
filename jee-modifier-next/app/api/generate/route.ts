@@ -297,7 +297,7 @@ const RESPONSE_SCHEMA = {
 // answers must not be economized). Env-overridable so a bad preview rollout
 // can be reverted from Vercel settings without a code change.
 const COUNT_MODEL = process.env.COUNT_MODEL || 'gemini-3.5-flash';
-const BATCH_MODEL = process.env.BATCH_MODEL || 'gemini-3.1-pro-preview';
+const BATCH_MODEL = process.env.BATCH_MODEL || 'gemini-3.1-pro';
 // Gemini 3.x thinking control (thinkingLevel replaces 2.5's thinkingBudget).
 const COUNT_THINKING_LEVEL = process.env.COUNT_THINKING_LEVEL || 'low';
 const BATCH_THINKING_LEVEL = process.env.BATCH_THINKING_LEVEL || 'high';
