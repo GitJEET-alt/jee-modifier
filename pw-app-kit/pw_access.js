@@ -30,16 +30,13 @@
 
 // --- PER-APP CONFIG — the only thing each app changes ---------------------
 // APP_NAME must EXACTLY match a header in row 1 of the `Whitelisted` tab.
-export const APP_NAME = "Final ZIP Package";
+// The placeholder is intentionally NOT a registered app — a copy where it was
+// forgotten fails loudly instead of silently billing some other app.
+export const APP_NAME = "SET-YOUR-APP-NAME";
 export const PROXY_BASE_URL = "https://pw-apps-proxy.vercel.app";
 
 const TIMEOUT_MS = 30_000;      // allowlist / logging
-const AI_TIMEOUT_MS = 300_000;  // gemini / mathpix / sarvam
-
-// Browser apps use proxy-first for Gemini (they can't safely hold a Vertex
-// token, and Vertex blocks browser CORS). Node/backends use token-vending.
-const IS_BROWSER = typeof window !== "undefined" && typeof document !== "undefined";
-const _vertexCache = { token: "", project: "", location: "global", expiry: 0 };
+const AI_TIMEOUT_MS = 300_000;  // AI provider calls — can be slow
 
 export class PWAccessError extends Error {}
 
@@ -186,96 +183,45 @@ export class UsageSession {
   }
 }
 
-async function getVertex(googleToken, app = APP_NAME) {
-  const now = Date.now();
-  if (_vertexCache.token && now < _vertexCache.expiry - 600000) return _vertexCache;
-  const r = await postJSON("/api/vertex/token", googleToken, { app }, TIMEOUT_MS);
-  if (r.status !== 200) throw new PWAccessError(`vertex token ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const d = await r.json();
-  _vertexCache.token = d.token || "";
-  _vertexCache.project = d.project || "";
-  _vertexCache.location = d.location || "global";
-  _vertexCache.expiry = now + (Number(d.expires_in) || 3300) * 1000;
-  return _vertexCache;
-}
-
-// Gemini (especially 2.5-pro) intermittently answers 429 RESOURCE_EXHAUSTED
-// for a few minutes — shared-capacity throttling, NOT something the app did.
-// Plan: retry the primary location after a short wait, then try other regions
-// (separate capacity pools), then one last patient retry. Only 429/503 are
-// retried; real errors surface immediately.
-const VERTEX_FALLBACK_LOCATIONS = ["us-central1", "europe-west4"];
-
-function vertexUrl(project, location, model) {
-  const host = location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
-  return `https://${host}/v1/projects/${project}/locations/${location}/publishers/google/models/${model}:generateContent`;
-}
-
-async function vertexGenerate(v, model, request) {
-  const attempts = [[v.location, 0], [v.location, 8000]];
-  for (const l of VERTEX_FALLBACK_LOCATIONS) if (l !== v.location) attempts.push([l, 0]);
-  attempts.push([v.location, 30000]);
-  let lastText = "";
-  for (const [loc, wait] of attempts) {
-    if (wait) await new Promise((r) => setTimeout(r, wait));
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS);
-    let r;
-    try {
-      r = await fetch(vertexUrl(v.project, loc, model), {
-        method: "POST",
-        headers: { Authorization: `Bearer ${v.token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-        signal: ctrl.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-    if (r.status === 200) return r.json();
-    const text = await r.text();
-    if (r.status === 404 && loc !== v.location) { lastText = text; continue; } // model not in this region
-    if (r.status !== 429 && r.status !== 503) {
-      throw new PWAccessError(`vertex gemini ${r.status}: ${text.slice(0, 300)}`);
-    }
-    lastText = text;
-  }
-  throw new PWAccessError(`vertex gemini busy (429) — retried ${attempts.length} times: ${lastText.slice(0, 200)}`);
-}
-
-/** Gemini. Browser → proxy-first (`/api/gemini/generate`; the proxy does the
- *  same 429 retry + regional fallback server-side). Node/backend →
- *  token-vending: calls Vertex directly (no 4.5 MB proxy body limit).
- *  Returns { ok, result, model, usage, cost_inr }; `result` is the raw
- *  generateContent response (same shape as the Gemini API). Capacity chokes
- *  (429/503) are ridden out automatically — see vertexGenerate. */
+/** Gemini THROUGH the proxy (platform LiteLLM gateway behind it) — same path
+ *  for browser and Node. Send the same generateContent-shaped `request` as
+ *  always; the proxy translates to/from the gateway, so `result` keeps the
+ *  Gemini response shape and existing parsing is unchanged.
+ *  Model names: existing ids (gemini-2.5-flash / gemini-2.5-pro) keep working;
+ *  newer gateway models (e.g. gemini-3.5-flash) can be passed the same way.
+ *  Capacity chokes (429/503) are retried by the proxy automatically.
+ *  LARGE REQUESTS (long PDFs, many images) are handled automatically: when
+ *  the payload exceeds ~3.5 MB the kit uploads it to the proxy's temp storage
+ *  via a short-lived signed link and sends only a reference — supported up to
+ *  ~60 MB per call, same result and context quality. */
 export async function geminiGenerate(googleToken,
   {
     model, request, filename = "", input_unit = "", count = null,
     video_duration = "", app = APP_NAME, session = null,
   }) {
-  if (IS_BROWSER) {
-    const body = { app, model, request, filename, input_unit, count, video_duration };
-    if (session) body.log = false;
-    const r = await postJSON("/api/gemini/generate", googleToken, body, AI_TIMEOUT_MS);
-    if (r.status !== 200) throw new PWAccessError(`gemini proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
-    const data = await r.json();
-    if (session) session.add(data.model || model, data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
-    return data;
-  }
-  // Node/backend: token-vending — call Vertex directly (with choke retries).
-  const v = await getVertex(googleToken, app);
-  const data = await vertexGenerate(v, model, request);
-  const um = data.usageMetadata || {};
-  const tin = um.promptTokenCount || 0;
-  const tout = (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0);
-  if (session) session.add(model, tin, tout, null);
-  else await logUsage(googleToken,
-    {
-      filename, input_unit, count,
-      items: [{ model, tokens_in: tin, tokens_out: tout, requests: 1 }],
-      video_duration, app,
+  const body = { app, model, request, filename, input_unit, count, video_duration };
+  if (session) body.log = false;
+  const requestJson = JSON.stringify(request);
+  if (requestJson.length > 3_500_000) {
+    // Blob detour: the proxy's front door caps bodies at ~4.5 MB, so big
+    // requests travel via temp storage instead (see /api/gemini/upload-url).
+    const up = await postJSON("/api/gemini/upload-url", googleToken, { app }, TIMEOUT_MS);
+    if (up.status !== 200) throw new PWAccessError(`gemini upload-url ${up.status}: ${(await up.text()).slice(0, 300)}`);
+    const { upload_url } = await up.json();
+    const pr = await fetch(upload_url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: requestJson,
     });
-  return { ok: true, result: data, model, usage: { tokens_in: tin, tokens_out: tout }, cost_inr: null };
+    if (pr.status !== 200) throw new PWAccessError(`gemini upload ${pr.status}: ${(await pr.text()).slice(0, 300)}`);
+    delete body.request;
+    body.request_blob_url = (await pr.json()).url || "";
+  }
+  const r = await postJSON("/api/gemini/generate", googleToken, body, AI_TIMEOUT_MS);
+  if (r.status !== 200) throw new PWAccessError(`gemini proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const data = await r.json();
+  if (session) session.add(data.model || model, data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
+  return data;
 }
 
 /** Mathpix OCR through the proxy. Returns { ok, result, cost_inr }. */
@@ -322,6 +268,72 @@ export async function elevenLabsTts(googleToken,
   if (r.status !== 200) throw new PWAccessError(`elevenlabs proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const data = await r.json();
   if (session) session.add(data.model || "ElevenLabs TTS", data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
+  return data;
+}
+
+/** Claude THROUGH the proxy (company Azure Anthropic endpoint behind it).
+ *  `request` is a raw Anthropic Messages body: { messages: [...], system,
+ *  max_tokens } (max_tokens defaults to 4096 if omitted). `model` is chosen
+ *  per call at app level, e.g. "claude-sonnet-4-5". Read the reply text from
+ *  result.content[0].text. Large requests (> ~3.5 MB) detour via temp storage
+ *  automatically. Capacity chokes are retried by the proxy. */
+export async function claudeGenerate(googleToken,
+  {
+    model, request, filename = "", input_unit = "", count = null,
+    video_duration = "", app = APP_NAME, session = null,
+  }) {
+  const body = { app, model, request, filename, input_unit, count, video_duration };
+  if (session) body.log = false;
+  const requestJson = JSON.stringify(request);
+  if (requestJson.length > 3_500_000) {
+    const up = await postJSON("/api/gemini/upload-url", googleToken, { app }, TIMEOUT_MS);
+    if (up.status !== 200) throw new PWAccessError(`claude upload-url ${up.status}: ${(await up.text()).slice(0, 300)}`);
+    const { upload_url } = await up.json();
+    const pr = await fetch(upload_url, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: requestJson,
+    });
+    if (pr.status !== 200) throw new PWAccessError(`claude upload ${pr.status}: ${(await pr.text()).slice(0, 300)}`);
+    delete body.request;
+    body.request_blob_url = (await pr.json()).url || "";
+  }
+  const r = await postJSON("/api/claude/generate", googleToken, body, AI_TIMEOUT_MS);
+  if (r.status !== 200) throw new PWAccessError(`claude proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const data = await r.json();
+  if (session) session.add(data.model || model, data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
+  return data;
+}
+
+/** Gemini text-to-speech through the proxy. Returns { ok, result, cost_inr };
+ *  `result` is { audio_base64, content_type: "audio/wav" } (24 kHz mono WAV).
+ *  Voices: Kore, Charon, Fenrir, Callirrhoe (and other Gemini TTS voices). */
+export async function geminiTts(googleToken,
+  {
+    text, voice = "Kore", model = "gemini-3.1-flash-tts-preview", filename = "",
+    count = null, video_duration = "", app = APP_NAME, session = null,
+  }) {
+  const body = { app, model, text, voice, filename, count, video_duration };
+  if (session) body.log = false;
+  const r = await postJSON("/api/gemini/tts", googleToken, body, AI_TIMEOUT_MS);
+  if (r.status !== 200) throw new PWAccessError(`gemini tts proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const data = await r.json();
+  if (session) session.add(data.model || "Gemini TTS", data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
+  return data;
+}
+
+/** Gemini image generation through the proxy. Returns { ok, result, cost_inr };
+ *  `result` is { image_base64, content_type: "image/png", text }. Models:
+ *  gemini-3.1-flash-image (fast) or gemini-3-pro-image (high fidelity). */
+export async function geminiImage(googleToken,
+  {
+    prompt, model = "gemini-3.1-flash-image", filename = "",
+    count = 1, video_duration = "", app = APP_NAME, session = null,
+  }) {
+  const body = { app, model, prompt, filename, count, video_duration };
+  if (session) body.log = false;
+  const r = await postJSON("/api/gemini/image", googleToken, body, AI_TIMEOUT_MS);
+  if (r.status !== 200) throw new PWAccessError(`gemini image proxy ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const data = await r.json();
+  if (session) session.add(data.model || "Gemini Image", data.usage?.tokens_in, data.usage?.tokens_out, data.cost_inr);
   return data;
 }
 

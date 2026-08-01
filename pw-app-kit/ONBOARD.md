@@ -1,6 +1,6 @@
 # Add your app to the PW shared proxy — 3 steps (~15 min)
 
-You never touch a service-account key or any provider key (Gemini / Mathpix /
+You never touch a service-account key or any provider key (Gemini / Claude / Mathpix /
 Sarvam / ElevenLabs). They live on the proxy. Your app only ever calls the
 proxy. That's the whole point.
 
@@ -49,7 +49,7 @@ if not pw_access.check_allowed(google_token):
     raise PermissionError("Not authorized for this app.")
 ```
 
-**Replace direct Gemini/Mathpix calls with the proxy helpers (they auto-log):**
+**Replace direct provider calls (Gemini/Claude/Mathpix/TTS) with the proxy helpers (they auto-log):**
 ```python
 resp = pw_access.gemini_generate(
     google_token,

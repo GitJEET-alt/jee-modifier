@@ -5,7 +5,7 @@ your app**:
 
 - ✅ per-user access control (app-wise whitelist)
 - ✅ automatic usage + cost logging
-- ✅ AI provider calls — **Gemini, Mathpix, Sarvam TTS, ElevenLabs TTS** — via the proxy
+- ✅ AI provider calls — **Gemini (text · TTS · images), Claude, Mathpix, Sarvam TTS, ElevenLabs TTS** — via the proxy
 - ✅ **7-day sign-in** — the kit swaps the Google login for a 7-day session pass, so long runs never drop mid-way and users re-login only weekly
 - ✅ **Gemini-busy protection** — capacity blips (`429 RESOURCE_EXHAUSTED`) are retried automatically, switching region if needed, instead of failing the run
 
@@ -36,7 +36,7 @@ pure frontend/SPA.
 | Proxy URL | `https://pw-apps-proxy.vercel.app` (already inside the client files) |
 | Control sheet | `https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE` |
 | Allowed sign-in domain | `pw.live` |
-| Providers available | Gemini · Mathpix · Sarvam TTS · ElevenLabs TTS |
+| Providers available | Gemini (text · TTS · images) · Claude · Mathpix · Sarvam TTS · ElevenLabs TTS |
 
 Video apps may optionally pass `video_duration` as an `mm:ss` string (for
 example `03:42`) to fill column L (`Video Duration`) in the shared `Usage Cost`
@@ -106,9 +106,10 @@ and safely — it only ever holds the user's *own* Google token, never a key.
 | `403 not authorized for <app>` | Your email isn't in your app's column on the `Whitelisted` tab. Add it. |
 | Your app isn't in `/api/apps` | App-name mismatch — it must match the sheet header **exactly** (spaces, case). |
 | Need OpenAI / another provider | Ask the proxy owner — one-time add on the proxy; then all apps can use it. |
-| App is Node / pure frontend | Use `pw_access.js` (same calls: `checkAllowed`, `geminiGenerate`, `mathpixOcr`, `sarvamTts`, `elevenLabsTts`). |
+| App is Node / pure frontend | Use `pw_access.js` (same calls: `checkAllowed`, `geminiGenerate`, `claudeGenerate`, `geminiTts`, `geminiImage`, `mathpixOcr`, `sarvamTts`, `elevenLabsTts`). |
 | Works, then **401s after ~50–60 min** (long runs die mid-way) | You're on an **old copy of `pw_access`**. The current kit automatically exchanges the Google token for a **7-day session pass**, which ends these drop-outs. Re-copy `pw_access.py` / `pw_access.js` from this kit (keep your `APP_NAME` line). |
-| `vertex gemini error 429 … RESOURCE_EXHAUSTED` | Google's shared Gemini capacity choked for a few minutes (hits `gemini-2.5-pro` mostly; flash is rarely affected). The current kit + proxy retry and switch region automatically — if you still see this instantly, you're on an old `pw_access` copy; re-copy it. Where pro isn't truly needed, prefer `gemini-2.5-flash`. |
+| `vertex gemini error …` or `vertex token error 410` | You're on an **old `pw_access` copy** from before the platform's Gemini migration — the old direct-Vertex path is permanently dead (Google-side). Re-copy `pw_access.py` / `pw_access.js` from this kit (keep your `APP_NAME` line); `gemini_generate` then works again with no other changes. |
+| `gemini proxy 429` (busy) | Gemini capacity choked for a few minutes. The proxy retries automatically; if it still surfaces, wait a minute and re-run. Where pro isn't truly needed, prefer `gemini-2.5-flash`. |
 | Hosted on Vercel/Render/etc. | Works identically — see "Which client + where it calls" above. |
 
 ## The one rule

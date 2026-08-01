@@ -4,7 +4,8 @@ pw_access.py — shared PW app-access client (drop-in for any PW app backend).
 Copy this ONE file into an app, set APP_NAME below, and you get:
   - live app-wise whitelist checks,
   - append-only usage logging,
-  - Gemini / Mathpix calls with keys that live ONLY on the proxy.
+  - AI provider calls — Gemini (text/TTS/image), Claude, Mathpix, Sarvam TTS,
+    ElevenLabs TTS — with keys that live ONLY on the proxy.
 
 This module talks ONLY to the shared proxy. It NEVER contains a service-account
 key or any provider (Gemini / Mathpix / ...) key. That is what makes API-key
@@ -46,7 +47,10 @@ import requests
 # PER-APP CONFIG — the only thing each app changes.
 # APP_NAME must EXACTLY match a header in row 1 of the `Whitelisted` tab.
 # --------------------------------------------------------------------------
-APP_NAME = "Final ZIP Package"
+# The placeholder below is intentionally NOT a registered app — a copy where
+# it was forgotten fails loudly ("not registered") instead of silently
+# billing some other app.
+APP_NAME = "SET-YOUR-APP-NAME"
 
 # Point this at your proxy. Override per-environment with PW_PROXY_BASE_URL.
 PROXY_BASE_URL = os.environ.get(
@@ -54,11 +58,11 @@ PROXY_BASE_URL = os.environ.get(
 ).rstrip("/")
 
 _TIMEOUT = 30       # allowlist / logging — fast
-_AI_TIMEOUT = 300   # Gemini / Mathpix — can be slow
+_AI_TIMEOUT = 300   # AI provider calls — can be slow
 
 
 class PWAccessError(Exception):
-    """Raised when a paid proxy call (Gemini/Mathpix) fails."""
+    """Raised when a paid proxy call (any AI provider) fails."""
 
 
 def _headers(token: str) -> Dict[str, str]:
@@ -235,7 +239,7 @@ class UsageSession:
         """Write one row per provider used this task (with its API-request count).
         Returns the proxy response, or None if nothing was accumulated. Call once,
         at the end of the task. If a provider's cost wasn't known client-side
-        (token-vending Gemini), it's omitted so the proxy computes it."""
+        it's omitted so the proxy computes it."""
         items = []
         for m, v in self._by_model.items():
             item = {"model": m, "tokens_in": v["tokens_in"],
@@ -251,77 +255,6 @@ class UsageSession:
                          video_duration=self.video_duration, app=self.app)
 
 
-# Vertex token cache. The SA token is identical for every user (it authenticates
-# the proxy's service account, not the end user), so it's shared process-wide.
-# Per-user authorization is enforced by check_allowed() before each run.
-_vertex_cache = {"token": "", "project": "", "location": "global", "expiry": 0.0}
-
-
-def _get_vertex(google_token, app=APP_NAME):
-    """Fetch (and cache) a short-lived Vertex token from the proxy; refresh
-    ~10 min before expiry."""
-    import time
-    now = time.time()
-    if _vertex_cache["token"] and now < _vertex_cache["expiry"] - 600:
-        return _vertex_cache
-    r = _post("/api/vertex/token", google_token, {"app": app}, _TIMEOUT)
-    if r.status_code != 200:
-        raise PWAccessError(f"vertex token error {r.status_code}: {r.text[:300]}")
-    d = r.json()
-    _vertex_cache.update({
-        "token": d.get("token", ""),
-        "project": d.get("project", ""),
-        "location": d.get("location", "global"),
-        "expiry": now + int(d.get("expires_in", 3300)),
-    })
-    return _vertex_cache
-
-
-# Gemini (especially 2.5-pro) intermittently answers 429 RESOURCE_EXHAUSTED
-# for a few minutes — shared-capacity throttling, NOT something the app did.
-# Plan: retry the primary location after a short wait, then try other regions
-# (separate capacity pools), then one last patient retry. Only 429/503 are
-# retried; real errors surface immediately.
-_VERTEX_FALLBACK_LOCATIONS = ["us-central1", "europe-west4"]
-
-
-def _vertex_url(project: str, location: str, model: str) -> str:
-    host = ("aiplatform.googleapis.com" if location == "global"
-            else f"{location}-aiplatform.googleapis.com")
-    return (f"https://{host}/v1/projects/{project}/locations/{location}"
-            f"/publishers/google/models/{model}:generateContent")
-
-
-def _vertex_generate(v: dict, model: str, request: dict) -> dict:
-    import time
-    primary = v["location"]
-    attempts = [(primary, 0), (primary, 8)]
-    attempts += [(l, 0) for l in _VERTEX_FALLBACK_LOCATIONS if l != primary]
-    attempts += [(primary, 30)]
-    last_text = ""
-    for loc, wait in attempts:
-        if wait:
-            time.sleep(wait)
-        r = requests.post(
-            _vertex_url(v["project"], loc, model),
-            headers={"Authorization": f"Bearer {v['token']}",
-                     "Content-Type": "application/json"},
-            json=request,
-            timeout=_AI_TIMEOUT,
-        )
-        if r.status_code == 200:
-            return r.json()
-        if r.status_code == 404 and loc != primary:
-            last_text = r.text  # model not hosted in this region — try the next
-            continue
-        if r.status_code not in (429, 503):
-            raise PWAccessError(f"vertex gemini error {r.status_code}: {r.text[:300]}")
-        last_text = r.text
-    raise PWAccessError(
-        f"vertex gemini busy (429) — retried {len(attempts)} times across "
-        f"{sorted(set(l for l, _ in attempts))}: {last_text[:200]}")
-
-
 def gemini_generate(
     google_token: str,
     *,
@@ -334,29 +267,48 @@ def gemini_generate(
     app: str = APP_NAME,
     session: "UsageSession" = None,
 ) -> dict:
-    """Call Gemini via Vertex AI. Fetches a short-lived Vertex token from the
-    proxy (cached), then calls Vertex DIRECTLY — so there is NO 4.5 MB proxy body
-    limit (important for large PDFs/images). Returns
-        {"ok": True, "result": <raw generateContent response>,
-         "model": ..., "usage": {...}, "cost_inr": None}
-    `result` has the same shape as the Gemini API, so existing parsing is
-    unchanged. Cost is computed by the proxy when the usage row is written.
-    When `session` is given, usage is added to it and written by session.flush().
-    Capacity chokes (429/503) are ridden out automatically: short-wait retries
-    plus regional fallback (see _vertex_generate)."""
-    v = _get_vertex(google_token, app)
-    data = _vertex_generate(v, model, request)
-    um = data.get("usageMetadata") or {}
-    tin = int(um.get("promptTokenCount") or 0)
-    tout = int((um.get("candidatesTokenCount") or 0) + (um.get("thoughtsTokenCount") or 0))
+    """Call Gemini THROUGH the proxy (platform LiteLLM gateway behind it).
+    Send the same generateContent-shaped `request` as always; the proxy
+    translates to/from the gateway, so `result` keeps the Gemini response
+    shape and existing parsing is unchanged. Returns
+        {"ok": True, "result": <Gemini-shaped response>,
+         "model": ..., "usage": {...}, "cost_inr": ...}
+    Model names: existing ids (gemini-2.5-flash / gemini-2.5-pro) keep working;
+    newer gateway models (e.g. gemini-3.5-flash) can be passed the same way.
+    Capacity chokes (429/503) are retried by the proxy automatically.
+    LARGE REQUESTS (long PDFs, many images) are handled automatically: when the
+    payload exceeds ~3.5 MB the kit uploads it to the proxy's temp storage via
+    a short-lived signed link and sends only a reference — supported up to
+    ~60 MB per call, with the exact same result and context quality.
+    When `session` is given, usage is accumulated and written once by
+    session.flush() instead of logged per call."""
+    import json as _json
+    payload = {"app": app, "model": model, "request": request, "filename": filename,
+               "input_unit": input_unit, "count": count, "video_duration": video_duration}
     if session is not None:
-        session.add(model, tin, tout, None)  # cost computed by the proxy at flush
-    else:
-        log_usage(google_token, filename=filename, input_unit=input_unit, count=count,
-                  items=[{"model": model, "tokens_in": tin, "tokens_out": tout, "requests": 1}],
-                  video_duration=video_duration, app=app)
-    return {"ok": True, "result": data, "model": model,
-            "usage": {"tokens_in": tin, "tokens_out": tout}, "cost_inr": None}
+        payload["log"] = False
+    request_bytes = _json.dumps(request).encode("utf-8")
+    if len(request_bytes) > 3_500_000:
+        # Blob detour: our proxy's front door caps bodies at ~4.5 MB, so big
+        # requests travel via temp storage instead (see /api/gemini/upload-url).
+        up = _post("/api/gemini/upload-url", google_token, {"app": app}, _TIMEOUT)
+        if up.status_code != 200:
+            raise PWAccessError(f"gemini upload-url error {up.status_code}: {up.text[:300]}")
+        pr = requests.put(
+            up.json()["upload_url"], data=request_bytes,
+            headers={"Content-Type": "application/json"}, timeout=_AI_TIMEOUT,
+        )
+        if pr.status_code != 200:
+            raise PWAccessError(f"gemini upload error {pr.status_code}: {pr.text[:300]}")
+        payload.pop("request")
+        payload["request_blob_url"] = pr.json().get("url", "")
+    r = _post("/api/gemini/generate", google_token, payload, _AI_TIMEOUT)
+    if r.status_code != 200:
+        raise PWAccessError(f"gemini proxy error {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    if session is not None:
+        _accumulate(session, data, default_model=model)
+    return data
 
 
 def mathpix_ocr(
@@ -451,4 +403,110 @@ def elevenlabs_tts(
     data = r.json()
     if session is not None:
         _accumulate(session, data, default_model="ElevenLabs TTS")
+    return data
+
+
+def claude_generate(
+    google_token,
+    *,
+    model: str,
+    request: dict,
+    filename: str = "",
+    input_unit: str = "",
+    count: Any = None,
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: "UsageSession" = None,
+) -> dict:
+    """Call Claude THROUGH the proxy (company Azure Anthropic endpoint behind
+    it). `request` is a raw Anthropic Messages body: {"messages": [...],
+    "system": ..., "max_tokens": ...} (max_tokens defaults to 4096 if omitted).
+    `model` is chosen per call at app level, e.g. "claude-sonnet-4-5". Returns
+        {"ok": True, "result": <raw Anthropic Messages response>,
+         "model": ..., "usage": {...}, "cost_inr": ...}
+    Read the reply text from result["content"][0]["text"]. Large requests
+    (> ~3.5 MB) detour via temp storage automatically, like gemini_generate.
+    Capacity chokes are retried by the proxy."""
+    import json as _json
+    payload = {"app": app, "model": model, "request": request, "filename": filename,
+               "input_unit": input_unit, "count": count, "video_duration": video_duration}
+    if session is not None:
+        payload["log"] = False
+    request_bytes = _json.dumps(request).encode("utf-8")
+    if len(request_bytes) > 3_500_000:
+        up = _post("/api/gemini/upload-url", google_token, {"app": app}, _TIMEOUT)
+        if up.status_code != 200:
+            raise PWAccessError(f"claude upload-url error {up.status_code}: {up.text[:300]}")
+        pr = requests.put(
+            up.json()["upload_url"], data=request_bytes,
+            headers={"Content-Type": "application/json"}, timeout=_AI_TIMEOUT,
+        )
+        if pr.status_code != 200:
+            raise PWAccessError(f"claude upload error {pr.status_code}: {pr.text[:300]}")
+        payload.pop("request")
+        payload["request_blob_url"] = pr.json().get("url", "")
+    r = _post("/api/claude/generate", google_token, payload, _AI_TIMEOUT)
+    if r.status_code != 200:
+        raise PWAccessError(f"claude proxy error {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    if session is not None:
+        _accumulate(session, data, default_model=model)
+    return data
+
+
+def gemini_tts(
+    google_token,
+    *,
+    text: str,
+    voice: str = "Kore",
+    model: str = "gemini-3.1-flash-tts-preview",
+    filename: str = "",
+    count: Any = None,
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: "UsageSession" = None,
+) -> dict:
+    """Gemini text-to-speech THROUGH the proxy. Returns {"ok": True,
+    "result": {"audio_base64": ..., "content_type": "audio/wav"}, ...}.
+    Voices: Kore, Charon, Fenrir, Callirrhoe (and other Gemini TTS voices).
+    Output is WAV (24 kHz mono). `count` = characters billed; defaults to
+    len(text). Billed to the app group's Gemini key (column M)."""
+    payload = {"app": app, "model": model, "text": text, "voice": voice,
+               "filename": filename, "count": count, "video_duration": video_duration}
+    if session is not None:
+        payload["log"] = False
+    r = _post("/api/gemini/tts", google_token, payload, _AI_TIMEOUT)
+    if r.status_code != 200:
+        raise PWAccessError(f"gemini tts proxy error {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    if session is not None:
+        _accumulate(session, data, default_model="Gemini TTS")
+    return data
+
+
+def gemini_image(
+    google_token,
+    *,
+    prompt: str,
+    model: str = "gemini-3.1-flash-image",
+    filename: str = "",
+    count: Any = 1,
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: "UsageSession" = None,
+) -> dict:
+    """Gemini image generation THROUGH the proxy. Returns {"ok": True,
+    "result": {"image_base64": ..., "content_type": "image/png", "text": ...},
+    ...}. Models: gemini-3.1-flash-image (fast) or gemini-3-pro-image
+    (high fidelity). Billed to the app group's Gemini key (column M)."""
+    payload = {"app": app, "model": model, "prompt": prompt,
+               "filename": filename, "count": count, "video_duration": video_duration}
+    if session is not None:
+        payload["log"] = False
+    r = _post("/api/gemini/image", google_token, payload, _AI_TIMEOUT)
+    if r.status_code != 200:
+        raise PWAccessError(f"gemini image proxy error {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    if session is not None:
+        _accumulate(session, data, default_model="Gemini Image")
     return data

@@ -16,7 +16,7 @@
 | Proxy base URL | `https://pw-apps-proxy.vercel.app` |
 | Control sheet (ONE shared sheet for ALL apps) | `https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE` |
 | Allowed sign-in domain | `pw.live` |
-| Providers already on the proxy (no keys in your app) | Gemini → `gemini_generate` · Mathpix → `mathpix_ocr` · Sarvam TTS → `sarvam_tts` · ElevenLabs TTS → `elevenlabs_tts` |
+| Providers already on the proxy (no keys in your app) | Gemini text → `gemini_generate` · Claude → `claude_generate` · Gemini TTS → `gemini_tts` · Gemini images → `gemini_image` · Mathpix → `mathpix_ocr` · Sarvam TTS → `sarvam_tts` · ElevenLabs TTS → `elevenlabs_tts` |
 
 **Your app ships ZERO API keys.** The proxy holds them all.
 
@@ -37,12 +37,14 @@ the client that fits; the steps are otherwise identical.
   never a provider key — so this is safe even in a public frontend bundle.
 - The proxy accepts a Google token from **any** Google sign-in, so a hosted app
   may use its **own** Google client ID. `@pw.live` is still required.
-- **Gemini routing is automatic — you don't configure it.** `gemini_generate`
-  picks the path itself: a **backend** (Python or Node) fetches a short-lived
-  Vertex token from the proxy and calls Vertex AI **directly** (no 4.5 MB proxy
-  body limit — needed for large PDFs/images); a **browser** calls the proxy's
-  `/api/gemini/generate` instead (Vertex blocks browser CORS, and a browser
-  shouldn't hold a Vertex token). Same `gemini_generate(...)` call either way.
+- **Gemini goes through the proxy for every app shape** (backend and browser
+  alike, via the company's platform gateway behind it). Keep sending the same
+  generateContent-style `request` — the proxy translates both directions, so
+  responses stay Gemini-shaped. Existing model ids (`gemini-2.5-flash`,
+  `gemini-2.5-pro`) keep working; newer ones (e.g. `gemini-3.5-flash`) can be
+  passed the same way. **Large requests (long PDFs, many images) are automatic**:
+  above ~3.5 MB the kit silently detours the payload through the proxy's temp
+  storage — up to **~60 MB per call**, same result, nothing for the app to do.
 
 ---
 
@@ -89,12 +91,17 @@ That's all a human does. Everything below is for the AI.
    when the proxy is unreachable.)
 5. **Route AI calls through the proxy.** Replace every direct provider call:
    - Gemini `generateContent` → `pw_access.gemini_generate(token, model=..., request=<same body>, filename=, input_unit=, count=, video_duration=)`
+   - Claude (Anthropic Messages) → `pw_access.claude_generate(token, model="claude-sonnet-4-5", request={"messages": [...]}, filename=, input_unit=, count=)`
+     (model chosen per call; reply text in `result["content"][0]["text"]`)
+   - Gemini TTS → `pw_access.gemini_tts(token, text=..., voice="Kore")` (WAV in `result["audio_base64"]`)
+   - Gemini image generation → `pw_access.gemini_image(token, prompt=...)` (PNG in `result["image_base64"]`)
    - Mathpix `/v3/text` → `pw_access.mathpix_ocr(token, request=<same body>, filename=, count=, video_duration=)`
    - Sarvam `/text-to-speech` → `pw_access.sarvam_tts(token, request=<same body>, filename=, count=, video_duration=)`
    - ElevenLabs `/v1/text-to-speech/{voice_id}` → `pw_access.elevenlabs_tts(token, voice_id=..., request=<same body>, filename=, count=, video_duration=)`
      (returns base64 audio in `result["audio_base64"]`, `audio/mpeg`)
 
-   (JS client `pw_access.js`: `geminiGenerate` / `mathpixOcr` / `sarvamTts` /
+   (JS client `pw_access.js`: `geminiGenerate` / `claudeGenerate` / `geminiTts` /
+   `geminiImage` / `mathpixOcr` / `sarvamTts` /
    `elevenLabsTts`, same fields, e.g. `await geminiGenerate(token, { model, request, ... })`.)
 
    `video_duration` is optional and only for video apps. Pass it as `mm:ss`

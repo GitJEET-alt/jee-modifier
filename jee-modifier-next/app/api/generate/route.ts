@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
 import { getToken } from 'next-auth/jwt';
 import { authOptions } from '@/lib/auth';
-import { createGoogleTokenProvider } from '@/lib/googleToken';
-import { checkAllowedStatus, geminiGenerate, UsageSession } from '@/pw_access.js';
+import { createGoogleTokenProvider, GoogleTokenError } from '@/lib/googleToken';
+import { checkAllowedStatus, geminiGenerate, UsageSession, PWAccessError } from '@/pw_access.js';
 
 export const maxDuration = 300;
 
@@ -311,6 +311,28 @@ function getGeminiText(response: any): string {
   return '';
 }
 
+// Retry transient network-level failures (socket resets, DNS blips — seen in
+// production as a bare "fetch failed" that killed whole papers). HTTP-level
+// errors arrive as PWAccessError (the proxy already retried what's
+// retryable) and auth failures as GoogleTokenError — both are final. Our own
+// timeouts (AbortError) are also final: retrying a 300s timeout would blow
+// the function deadline.
+const NETWORK_RETRIES = 2;
+async function withNetworkRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      const isFinal = e instanceof PWAccessError
+        || e instanceof GoogleTokenError
+        || e?.name === 'AbortError'
+        || attempt >= NETWORK_RETRIES;
+      if (isFinal) throw e;
+      await new Promise(r => setTimeout(r, (attempt + 1) * 1500));
+    }
+  }
+}
+
 function getUsage(proxyResponse: any, providerResponse: any) {
   return {
     tokens_input: proxyResponse?.usage?.tokens_in ?? providerResponse?.usageMetadata?.promptTokenCount ?? 0,
@@ -404,7 +426,7 @@ export async function POST(req: Request) {
       ]
     };
 
-    const countProxyResponse = await geminiGenerate(googleToken, {
+    const countProxyResponse = await withNetworkRetry(() => geminiGenerate(googleToken, {
       model: COUNT_MODEL,
       request: {
         contents: [initialUserTurn],
@@ -417,7 +439,7 @@ export async function POST(req: Request) {
       filename,
       input_unit: inputUnit,
       session: usageSession,
-    });
+    }));
 
     const countProviderResponse = countProxyResponse.result;
     const countText = getGeminiText(countProviderResponse);
@@ -449,7 +471,7 @@ export async function POST(req: Request) {
       };
 
       const contents = [...history, userTurn];
-      const batchProxyResponse = await geminiGenerate(googleToken, {
+      const batchProxyResponse = await withNetworkRetry(() => geminiGenerate(googleToken, {
         model: BATCH_MODEL,
         request: {
           contents,
@@ -465,7 +487,7 @@ export async function POST(req: Request) {
         input_unit: inputUnit,
         count: totalQuestions as any,
         session: usageSession,
-      });
+      }));
 
       const batchProviderResponse = batchProxyResponse.result;
       const jsonText = getGeminiText(batchProviderResponse) || '[]';
